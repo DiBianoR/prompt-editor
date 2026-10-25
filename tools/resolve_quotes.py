@@ -263,7 +263,8 @@ def resolve_range(doc, item):
     if "quote" in item:
         q = clean_quote(str(item["quote"]))
         parts = [p for p in _ELLIPSIS.split(q) if p.strip()]
-        if len(parts) >= 2 and ("..." in q or "…" in q):
+        literal = q in doc.text or normalize_key(q) in doc.norm.text
+        if len(parts) >= 2 and not literal:
             # An abbreviated quote: treat its first and last parts as from/to.
             return resolve_range(doc, {"from": parts[0], "to": parts[-1], "line": hint})
         start, end, status = find_text(doc, q, hint)

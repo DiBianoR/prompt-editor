@@ -202,6 +202,15 @@ void anchorRangeIn(Range& r, const std::string& doc, const NormalizedText& n) {
 
 }  // namespace
 
+bool locateApproximately(const NormalizedText& n, const std::string& key, size_t near, size_t& start,
+                         size_t& end) {
+    Choice c{};
+    if (!fuzzyMatch(n, key, std::string(), std::string(), near, c)) return false;
+    start = c.candidate.start;
+    end = c.candidate.end;
+    return true;
+}
+
 int AnchorSummary::total() const {
     int t = 0;
     for (int c : counts) t += c;

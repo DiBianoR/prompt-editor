@@ -13,7 +13,20 @@ subtopics to ranges of the prompt. Each range stores byte offsets plus its
 exact text and surrounding context, so it can be found again after the prompt
 changes.
 
-- Write a spec that only quotes text, and build the index with
+- Build it with a model from the app: **Index > LLM settings...** takes the
+  endpoint of any OpenAI-compatible server (e.g. a local llama.cpp router at
+  `http://host:port/v1`), the API key and the model, and lets you edit each
+  prompt or reset it to its default. **Index > Rebuild index with the model**
+  (Ctrl+R) asks for the topic list (or has the model propose one) and then
+  indexes each topic in its own conversation: the model reports every passage
+  on the topic, converts its findings into ranges, and fixes any range that
+  does not match the document. Progress shows at the bottom; Cancel stops it.
+  **Rebuild selected topic** redoes one topic. Settings live in
+  `%APPDATA%\PromptEditor` (the key encrypted for your Windows account) and
+  transcripts of each run in `%LOCALAPPDATA%\PromptEditor\runs`.
+- The default prompts are `tools/prompts/*.md`, built into the app. The same
+  pipeline is available from a terminal as `tools/llm_index.py`.
+- Or write a spec that only quotes text, and build the index with
   `py tools/build_index.py prompt.md spec.json prompt.index.json`.
 - Edits made in the editor move ranges with the text; saving writes the
   updated index. Ranges edited since the last LLM refresh are marked

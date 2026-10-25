@@ -25,6 +25,13 @@ void anchorRange(Range& range, const std::string& doc);
 // offsets are trusted as they are.
 AnchorSummary anchorIndex(Index& index, const std::string& doc);
 
+struct NormalizedText;
+
+// Approximate location of a normalized key in normalized text, preferring the
+// match nearest `near` (a normalized offset). Returns false if none is close.
+bool locateApproximately(const NormalizedText& n, const std::string& key, size_t near, size_t& start,
+                         size_t& end);
+
 // Brings the index in line with doc before saving: re-reads exact text and
 // context from the tracked offsets, recomputes unindexed text and the hash.
 void refreshFromDocument(Index& index, const std::string& doc);

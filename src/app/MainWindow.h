@@ -4,13 +4,20 @@
 #include <windows.h>
 #include <commctrl.h>
 
+#include <atomic>
 #include <filesystem>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "Scintilla.h"
+#include "Settings.h"
 #include "core/Anchor.h"
 #include "core/Index.h"
+#include "core/Pipeline.h"
+
+class LlmClient;
 
 // Two panes: topics from the index on the left, the document on the right.
 // Selecting a topic highlights its ranges; Next/Previous steps through them.
@@ -75,6 +82,24 @@ private:
     void paintOverview(HDC dc, const RECT& rc);
     void overviewClick(int y, int height);
 
+    // LLM indexing runs on a worker thread; results come back as messages.
+    struct Job {
+        enum Kind { Build, Discover } kind = Build;
+        std::vector<pe::TopicRequest> topics;
+        int replaceTopic = -1;    // rebuild just this topic of the index
+        std::wstring topicsText;  // Discover: the topic list to add proposals to
+    };
+    struct JobResult;
+    void openSettings();
+    void rebuildIndexDialog(std::wstring topicsText = {});
+    void rebuildSelectedTopic();
+    void startJob(Job job);
+    void onJobDone(JobResult* result);
+    void cancelJob();
+    void appendLog(const std::wstring& line);
+    void showLog(bool show);
+    void writeIndexFile();
+
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
     HWND tree_ = nullptr;
@@ -92,6 +117,7 @@ private:
     int dpi_ = 96;
     int treeWidth_ = 300;  // at 96 DPI
     bool draggingSplitter_ = false;
+    bool rebuildingTree_ = false;
 
     std::filesystem::path docPath_;
     std::filesystem::path indexPath_;
@@ -109,4 +135,16 @@ private:
     NodeRef selected_{-1, -1};
     std::vector<Hit> hits_;
     int current_ = -1;
+    std::wstring indexSource_;  // how the current index came to be, for the status bar
+
+    AppSettings settings_;
+    std::thread worker_;
+    std::atomic<bool> cancel_{false};
+    std::shared_ptr<LlmClient> client_;
+    bool jobRunning_ = false;
+    bool logVisible_ = false;
+    HWND logTitle_ = nullptr;
+    HWND logEdit_ = nullptr;
+    HWND logCancel_ = nullptr;
+    HWND logClose_ = nullptr;
 };

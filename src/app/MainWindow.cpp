@@ -5,9 +5,13 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <ctime>
 #include <fstream>
+#include <set>
 #include <sstream>
 
+#include "Dialogs.h"
+#include "LlmClient.h"
 #include "core/Text.h"
 #include "core/Tracker.h"
 
@@ -22,6 +26,10 @@ enum : int {
     IDM_PREV,
     IDM_FOCUS_TOPICS,
     IDM_FOCUS_EDITOR,
+    IDM_REBUILD,
+    IDM_REBUILD_TOPIC,
+    IDM_CANCEL_INDEXING,
+    IDM_SETTINGS,
     IDC_TREE = 200,
     IDC_EDITOR,
     IDC_PREV_BUTTON,
@@ -29,9 +37,14 @@ enum : int {
     IDC_NAV_LABEL,
     IDC_STATUS,
     IDC_OVERVIEW,
+    IDC_LOG_EDIT,
+    IDC_LOG_CANCEL,
+    IDC_LOG_CLOSE,
 };
 
 constexpr UINT WM_APP_REFRESH = WM_APP + 1;
+constexpr UINT WM_APP_JOB_LOG = WM_APP + 2;   // lParam: std::wstring*, owned by the receiver
+constexpr UINT WM_APP_JOB_DONE = WM_APP + 3;  // lParam: JobResult*, owned by the receiver
 constexpr int kIndicTopic = 8;    // every range of the selection, in its topic color
 constexpr int kIndicCurrent = 9;  // the hit Next/Previous is on
 constexpr int kIndicReview = 10;  // fuzzy or ambiguous anchors: verify these
@@ -40,14 +53,6 @@ constexpr COLORREF kGapColor = RGB(0xB0, 0xB0, 0xB0);
 const wchar_t kMainClass[] = L"PromptEditorMain";
 const wchar_t kOverviewClass[] = L"PromptEditorOverview";
 const wchar_t kAppName[] = L"Prompt Editor";
-
-std::wstring widen(const std::string& s) {
-    if (s.empty()) return {};
-    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(n, L'\0');
-    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), w.data(), n);
-    return w;
-}
 
 COLORREF parseColor(const std::string& hex, COLORREF fallback) {
     if (hex.size() != 7 || hex[0] != '#') return fallback;
@@ -130,9 +135,16 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(nav, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(nav, MF_STRING, IDM_FOCUS_TOPICS, L"Go to &topics\tCtrl+1");
     AppendMenuW(nav, MF_STRING, IDM_FOCUS_EDITOR, L"Go to &document\tCtrl+2");
+    HMENU indexMenu = CreatePopupMenu();
+    AppendMenuW(indexMenu, MF_STRING, IDM_REBUILD, L"&Rebuild index with the model...\tCtrl+R");
+    AppendMenuW(indexMenu, MF_STRING, IDM_REBUILD_TOPIC, L"Rebuild selected &topic");
+    AppendMenuW(indexMenu, MF_STRING, IDM_CANCEL_INDEXING, L"&Cancel indexing");
+    AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(indexMenu, MF_STRING, IDM_SETTINGS, L"LLM &settings...");
     HMENU bar = CreateMenu();
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(nav), L"&Navigate");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(indexMenu), L"&Index");
 
     ACCEL keys[] = {
         {FCONTROL | FVIRTKEY, 'O', IDM_OPEN},
@@ -144,6 +156,7 @@ bool MainWindow::create(HINSTANCE instance, int show) {
         {FALT | FVIRTKEY, VK_UP, IDM_PREV},
         {FCONTROL | FVIRTKEY, '1', IDM_FOCUS_TOPICS},
         {FCONTROL | FVIRTKEY, '2', IDM_FOCUS_EDITOR},
+        {FCONTROL | FVIRTKEY, 'R', IDM_REBUILD},
     };
     accel_ = CreateAcceleratorTableW(keys, ARRAYSIZE(keys));
 
@@ -187,6 +200,18 @@ void MainWindow::createChildren() {
                                 reinterpret_cast<HMENU>(IDC_OVERVIEW), instance_, this);
     status_ = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr, WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0,
                               hwnd_, reinterpret_cast<HMENU>(IDC_STATUS), instance_, nullptr);
+    // Indexing log, shown at the bottom while the model works.
+    logTitle_ = CreateWindowExW(0, WC_STATICW, L"Indexing", WS_CHILD | SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS |
+                                    SS_NOPREFIX,
+                                0, 0, 0, 0, hwnd_, nullptr, instance_, nullptr);
+    logEdit_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_EDITW, nullptr,
+                               WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0, hwnd_,
+                               reinterpret_cast<HMENU>(IDC_LOG_EDIT), instance_, nullptr);
+    SendMessageW(logEdit_, EM_SETLIMITTEXT, 1 << 22, 0);
+    logCancel_ = CreateWindowExW(0, WC_BUTTONW, L"Cancel", WS_CHILD | WS_TABSTOP, 0, 0, 0, 0, hwnd_,
+                                 reinterpret_cast<HMENU>(IDC_LOG_CANCEL), instance_, nullptr);
+    logClose_ = CreateWindowExW(0, WC_BUTTONW, L"Hide", WS_CHILD | WS_TABSTOP, 0, 0, 0, 0, hwnd_,
+                                reinterpret_cast<HMENU>(IDC_LOG_CLOSE), instance_, nullptr);
 
     sciFn_ = reinterpret_cast<SciFnDirect>(SendMessageW(editor_, SCI_GETDIRECTFUNCTION, 0, 0));
     sciPtr_ = static_cast<sptr_t>(SendMessageW(editor_, SCI_GETDIRECTPOINTER, 0, 0));
@@ -232,7 +257,7 @@ void MainWindow::updateFonts() {
     NONCLIENTMETRICSW ncm{sizeof ncm};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, dpi_);
     HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for (HWND w : {tree_, prevButton_, nextButton_, navLabel_, status_})
+    for (HWND w : {tree_, prevButton_, nextButton_, navLabel_, status_, logTitle_, logEdit_, logCancel_, logClose_})
         SendMessageW(w, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     if (uiFont_) DeleteObject(uiFont_);
     uiFont_ = font;
@@ -248,7 +273,15 @@ void MainWindow::layout() {
     RECT sr;
     GetWindowRect(status_, &sr);
     const int statusH = sr.bottom - sr.top;
-    const int w = rc.right, h = rc.bottom - statusH;
+    const int logH = logVisible_ ? scale(190) : 0;
+    const int w = rc.right, h = rc.bottom - statusH - logH;
+    if (logVisible_) {
+        const int pad = scale(4), rowH = scale(28), btnW = scale(90);
+        SetWindowPos(logTitle_, nullptr, pad * 2, h + pad, w - 2 * btnW - pad * 6, rowH, SWP_NOZORDER);
+        SetWindowPos(logCancel_, nullptr, w - 2 * btnW - pad * 2, h + pad, btnW, rowH, SWP_NOZORDER);
+        SetWindowPos(logClose_, nullptr, w - btnW - pad, h + pad, btnW, rowH, SWP_NOZORDER);
+        SetWindowPos(logEdit_, nullptr, 0, h + rowH + pad * 2, w, logH - rowH - pad * 2, SWP_NOZORDER);
+    }
     const int tw = std::clamp(scale(treeWidth_), scale(120), std::max(scale(120), w - scale(200)));
     const int split = scale(5), navH = scale(36), ovW = scale(14), pad = scale(4);
     const int x = tw + split;
@@ -295,6 +328,7 @@ bool MainWindow::open(const std::filesystem::path& docPath, std::filesystem::pat
         }
     }
     if (hasIndex_) summary_ = pe::anchorIndex(index_, bytes);
+    indexSource_ = !hasIndex_ ? L"" : summary_.hashMatched ? L"Index matched the file" : L"Index re-anchored";
 
     loading_ = true;
     sci(SCI_SETEOLMODE, bytes.find("\r\n") != std::string::npos ? SC_EOL_CRLF : SC_EOL_LF);
@@ -376,6 +410,7 @@ void MainWindow::reloadIndex() {
     }
     hasIndex_ = true;
     summary_ = pe::anchorIndex(index_, documentText());
+    indexSource_ = L"Index reloaded";
     selected_ = {-1, -1};
     hits_.clear();
     current_ = -1;
@@ -415,6 +450,8 @@ std::wstring MainWindow::nodeLabel(const NodeRef& node) const {
 }
 
 void MainWindow::buildTree() {
+    // Deleting items moves the tree's selection item by item; ignore those events.
+    rebuildingTree_ = true;
     SendMessageW(tree_, WM_SETREDRAW, FALSE, 0);
     TreeView_DeleteAllItems(tree_);
     nodes_.clear();
@@ -467,6 +504,7 @@ void MainWindow::buildTree() {
     DeleteDC(mem);
     ReleaseDC(nullptr, screen);
     TreeView_SetImageList(tree_, images_, TVSIL_NORMAL);
+    rebuildingTree_ = false;
     SendMessageW(tree_, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(tree_, nullptr, TRUE);
 }
@@ -695,12 +733,10 @@ void MainWindow::updateStatus() {
         anchors += L" • " + std::to_wstring(touched) + L" edited • " + std::to_wstring(gaps_.size()) +
                    L" unindexed";
     }
-    std::wstring load;
-    if (hasIndex_)
-        load = summary_.hashMatched ? L"Index matched the file" : L"Index re-anchored";
+    const std::wstring source = jobRunning_ ? L"Indexing..." : indexSource_;
     SendMessageW(status_, SB_SETTEXTW, 0, reinterpret_cast<LPARAM>(path.c_str()));
     SendMessageW(status_, SB_SETTEXTW, 1, reinterpret_cast<LPARAM>(anchors.c_str()));
-    SendMessageW(status_, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(load.c_str()));
+    SendMessageW(status_, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(source.c_str()));
 }
 
 // ---- Overview strip ------------------------------------------------------
@@ -785,6 +821,268 @@ LRESULT CALLBACK MainWindow::overviewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+// ---- LLM indexing --------------------------------------------------------
+
+struct MainWindow::JobResult {
+    Job job;
+    std::string snapshot;  // the document text the model saw
+    std::vector<pe::Topic> topics;
+    std::vector<pe::TopicRequest> proposals;
+    std::filesystem::path folder;
+    std::string model;
+    std::string error;
+    bool cancelled = false;
+    int failedTopics = 0;
+};
+
+void MainWindow::openSettings() {
+    SettingsDialog dlg(AppSettings::load());
+    if (!dlg.show(hwnd_)) return;
+    settings_ = dlg.settings();
+    if (!settings_.save()) showError(hwnd_, L"The settings could not be saved to " + AppSettings::folder().wstring());
+}
+
+void MainWindow::rebuildIndexDialog(std::wstring topicsText) {
+    if (docPath_.empty() || jobRunning_) return;
+    if (topicsText.empty() && hasIndex_)
+        for (const pe::Topic& t : index_.topics) topicsText += widen(t.name) + L"\n";
+    TopicsDialog dlg(topicsText);
+    const TopicsDialog::Result result = dlg.show(hwnd_);
+    if (result == TopicsDialog::kPropose) {
+        Job job;
+        job.kind = Job::Discover;
+        job.topicsText = dlg.text();
+        startJob(std::move(job));
+    } else if (result == TopicsDialog::kBuild) {
+        Job job;
+        job.topics = pe::parseTopicLines(narrow(dlg.text()));
+        if (!job.topics.empty()) startJob(std::move(job));
+    }
+}
+
+void MainWindow::rebuildSelectedTopic() {
+    if (jobRunning_ || !hasIndex_ || selected_.topic < 0) return;
+    Job job;
+    job.replaceTopic = selected_.topic;  // a subtopic rebuilds its whole topic
+    job.topics.push_back({index_.topics[selected_.topic].name, ""});
+    startJob(std::move(job));
+}
+
+void MainWindow::startJob(Job job) {
+    if (jobRunning_ || docPath_.empty()) return;
+    settings_ = AppSettings::load();
+    if (!settings_.serverConfigured()) {
+        MessageBoxW(hwnd_, L"Set the endpoint and model first.", kAppName, MB_OK | MB_ICONINFORMATION);
+        openSettings();
+        if (!settings_.serverConfigured()) return;
+    }
+
+    char stamp[32];
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+    localtime_s(&tm, &now);
+    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
+    auto result = std::make_unique<JobResult>();
+    result->snapshot = documentText();
+    result->folder = runsFolder() / (widen(stamp) + L"-" + docPath_.stem().wstring());
+    result->model = settings_.model;
+
+    client_ = std::make_shared<LlmClient>(settings_.baseUrl, settings_.model, settings_.apiKey);
+    client_->setTranscriptFolder(result->folder / L"calls");
+    cancel_ = false;
+    jobRunning_ = true;
+    SetWindowTextW(logEdit_, L"");
+    showLog(true);
+    SetWindowTextW(logTitle_, (L"Indexing with " + widen(settings_.model)).c_str());
+    appendLog(L"Model " + widen(settings_.model) + L" at " + widen(settings_.baseUrl));
+    updateStatus();
+
+    // The worker gets copies of everything it reads; only cancel_ is shared.
+    const pe::Index previous = index_;
+    const bool hasPrevious = hasIndex_;
+    const pe::PromptSet prompts = settings_.prompts();
+    const int repairs = settings_.repairs;
+    result->job = std::move(job);
+    std::shared_ptr<LlmClient> client = client_;
+    HWND hwnd = hwnd_;
+    std::atomic<bool>* cancel = &cancel_;
+    worker_ = std::thread([result = result.release(), previous, hasPrevious, prompts, repairs, client, hwnd, cancel]() {
+        auto log = [hwnd](const std::string& line) {
+            PostMessageW(hwnd, WM_APP_JOB_LOG, 0, reinterpret_cast<LPARAM>(new std::wstring(widen(line))));
+        };
+        pe::PipelineHooks hooks;
+        hooks.log = log;
+        hooks.cancelled = [cancel] { return cancel->load(); };
+        hooks.save = [folder = result->folder](const std::string& name, const std::string& content) {
+            std::error_code ec;
+            const std::filesystem::path p = folder / std::filesystem::u8path(name);
+            std::filesystem::create_directories(p.parent_path(), ec);
+            std::ofstream(p, std::ios::binary) << content;
+        };
+        try {
+            const pe::SourceDocument doc(result->snapshot);
+            const pe::Index* prev = hasPrevious ? &previous : nullptr;
+            if (result->job.kind == Job::Discover) {
+                result->proposals = pe::discoverTopics(*client, doc, prompts, prev, hooks);
+            } else {
+                std::set<std::string> used;
+                if (result->job.replaceTopic >= 0)
+                    for (int i = 0; i < static_cast<int>(previous.topics.size()); ++i)
+                        if (i != result->job.replaceTopic) {
+                            used.insert(previous.topics[i].id);
+                            for (const pe::Topic& s : previous.topics[i].subtopics) used.insert(s.id);
+                        }
+                const auto& topics = result->job.topics;
+                for (size_t i = 0; i < topics.size(); ++i) {
+                    log("[" + std::to_string(i + 1) + "/" + std::to_string(topics.size()) + "] " + topics[i].name);
+                    const size_t palette = result->job.replaceTopic >= 0 ? result->job.replaceTopic : i;
+                    try {
+                        pe::TopicOutcome out = pe::indexTopic(*client, doc, topics[i], prompts, repairs, hooks);
+                        size_t ranges = out.topic.spans.size();
+                        for (const auto& s : out.topic.subtopics) ranges += s.spans.size();
+                        log("  done: " + std::to_string(ranges) + " ranges, " +
+                            std::to_string(out.topic.subtopics.size()) + " subtopics");
+                        for (const std::string& d : out.dropped) log("  left out (never matched): " + d);
+                        result->topics.push_back(pe::toIndexTopic(out.topic, prev, used, palette));
+                    } catch (const pe::Cancelled&) {
+                        throw;
+                    } catch (const std::exception& e) {
+                        ++result->failedTopics;
+                        log(std::string("  FAILED: ") + e.what());
+                        // Keep what the index already had for this topic, if anything.
+                        if (prev)
+                            for (const pe::Topic& t : prev->topics)
+                                if (t.name == topics[i].name) {
+                                    result->topics.push_back(t);
+                                    log("  kept the previous ranges for this topic");
+                                }
+                    }
+                }
+            }
+        } catch (const pe::Cancelled&) {
+            result->cancelled = true;
+        } catch (const std::exception& e) {
+            result->error = e.what();
+        }
+        PostMessageW(hwnd, WM_APP_JOB_DONE, 0, reinterpret_cast<LPARAM>(result));
+    });
+}
+
+void MainWindow::cancelJob() {
+    if (!jobRunning_) return;
+    cancel_ = true;
+    if (client_) client_->abort();
+    appendLog(L"Cancelling...");
+}
+
+void MainWindow::onJobDone(JobResult* raw) {
+    std::unique_ptr<JobResult> result(raw);
+    if (worker_.joinable()) worker_.join();
+    jobRunning_ = false;
+    EnableWindow(logCancel_, FALSE);
+    const int calls = client_ ? client_->calls() : 0;
+    client_.reset();
+    SetWindowTextW(logTitle_, L"Indexing finished");
+    updateStatus();
+    if (result->cancelled) {
+        appendLog(L"Cancelled. The index was not changed.");
+        SetWindowTextW(logTitle_, L"Indexing cancelled");
+        return;
+    }
+    if (!result->error.empty()) {
+        appendLog(L"Stopped: " + widen(result->error));
+        SetWindowTextW(logTitle_, L"Indexing failed");
+        return;
+    }
+    const std::wstring transcripts = L"Transcripts: " + result->folder.wstring();
+
+    if (result->job.kind == Job::Discover) {
+        std::wstring text = result->job.topicsText;
+        std::set<std::string> have;
+        for (const pe::TopicRequest& t : pe::parseTopicLines(narrow(text))) have.insert(t.name);
+        if (!text.empty() && text.back() != L'\n') text += L"\n";
+        int added = 0;
+        for (const pe::TopicRequest& t : result->proposals) {
+            if (have.count(t.name)) continue;
+            text += widen(t.name) + (t.hint.empty() ? L"" : L" | " + widen(t.hint)) + L"\n";
+            ++added;
+        }
+        appendLog(std::to_wstring(added) + L" new topics proposed. " + transcripts);
+        rebuildIndexDialog(text);
+        return;
+    }
+
+    if (result->topics.empty()) {
+        appendLog(L"No topic could be indexed; the index was not changed. " + transcripts);
+        return;
+    }
+    // The model saw a snapshot; if the text changed meanwhile, anchor to the current text.
+    const std::string current = documentText();
+    pe::Index built = pe::assembleIndex(narrow(docPath_.filename().wstring()), result->snapshot, result->topics);
+    if (current != result->snapshot) pe::anchorIndex(built, current);
+    if (result->job.replaceTopic >= 0 && hasIndex_ && result->job.replaceTopic < static_cast<int>(index_.topics.size())) {
+        index_.topics[result->job.replaceTopic] = built.topics.front();
+    } else {
+        index_ = std::move(built);
+        hasIndex_ = true;
+    }
+    indexSource_ = L"Index built by " + widen(result->model);
+    writeIndexFile();
+    selected_ = {-1, -1};
+    hits_.clear();
+    current_ = -1;
+    buildTree();
+    refresh();
+
+    int ranges = 0, review = 0;
+    index_.forEachRange([&](pe::Range& r) {
+        ++ranges;
+        review += pe::needsReview(r.status);
+    });
+    appendLog(L"Done: " + std::to_wstring(index_.topics.size()) + L" topics, " + std::to_wstring(ranges) +
+              L" ranges, " + std::to_wstring(review) + L" to verify, " + std::to_wstring(gaps_.size()) +
+              L" unindexed passages, " + std::to_wstring(calls) + L" model calls" +
+              (result->failedTopics ? L", " + std::to_wstring(result->failedTopics) + L" topics failed" : L"") + L".");
+    appendLog(transcripts);
+}
+
+// Writes the index now if the document is saved; otherwise it is written with
+// the next save, so the index never describes text that is not on disk.
+void MainWindow::writeIndexFile() {
+    if (sci(SCI_GETMODIFY)) {
+        appendLog(L"The index will be saved together with the document (Ctrl+S).");
+        return;
+    }
+    std::error_code ec;
+    if (std::filesystem::exists(indexPath_, ec)) {
+        std::filesystem::path backup = indexPath_;
+        backup += L".bak";
+        std::filesystem::copy_file(indexPath_, backup, std::filesystem::copy_options::overwrite_existing, ec);
+    }
+    pe::refreshFromDocument(index_, documentText());
+    if (writeFileAtomic(indexPath_, pe::serializeIndex(index_)))
+        appendLog(L"Saved " + indexPath_.filename().wstring() + L" (previous version kept as .bak).");
+    else
+        appendLog(L"Could not write " + indexPath_.wstring());
+}
+
+void MainWindow::appendLog(const std::wstring& line) {
+    std::wstring text = line;
+    for (size_t i = 0; (i = text.find(L'\n', i)) != std::wstring::npos; i += 2) text.insert(i, 1, L'\r');
+    text += L"\r\n";
+    const int len = GetWindowTextLengthW(logEdit_);
+    SendMessageW(logEdit_, EM_SETSEL, len, len);
+    SendMessageW(logEdit_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
+    if (jobRunning_ && !line.empty() && line[0] != L' ') SetWindowTextW(logTitle_, line.c_str());
+}
+
+void MainWindow::showLog(bool show) {
+    logVisible_ = show;
+    EnableWindow(logCancel_, jobRunning_);
+    for (HWND w : {logTitle_, logEdit_, logCancel_, logClose_}) ShowWindow(w, show ? SW_SHOW : SW_HIDE);
+    layout();
+}
+
 // ---- Window procedure ----------------------------------------------------
 
 LRESULT CALLBACK MainWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -866,8 +1164,32 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_PREV_BUTTON: next(-1); return 0;
                 case IDM_FOCUS_TOPICS: SetFocus(tree_); return 0;
                 case IDM_FOCUS_EDITOR: SetFocus(editor_); return 0;
+                case IDM_REBUILD: rebuildIndexDialog(); return 0;
+                case IDM_REBUILD_TOPIC: rebuildSelectedTopic(); return 0;
+                case IDM_CANCEL_INDEXING:
+                case IDC_LOG_CANCEL: cancelJob(); return 0;
+                case IDM_SETTINGS: openSettings(); return 0;
+                case IDC_LOG_CLOSE: showLog(false); return 0;
             }
             break;
+
+        case WM_INITMENUPOPUP: {
+            HMENU menu = reinterpret_cast<HMENU>(wp);
+            auto enable = [&](UINT id, bool on) { EnableMenuItem(menu, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED)); };
+            enable(IDM_REBUILD, !jobRunning_ && !docPath_.empty());
+            enable(IDM_REBUILD_TOPIC, !jobRunning_ && hasIndex_ && selected_.topic >= 0);
+            enable(IDM_CANCEL_INDEXING, jobRunning_);
+            return 0;
+        }
+
+        case WM_APP_JOB_LOG: {
+            std::unique_ptr<std::wstring> line(reinterpret_cast<std::wstring*>(lp));
+            appendLog(*line);
+            return 0;
+        }
+        case WM_APP_JOB_DONE:
+            onJobDone(reinterpret_cast<JobResult*>(lp));
+            return 0;
 
         case WM_NOTIFY: {
             const auto* hdr = reinterpret_cast<const NMHDR*>(lp);
@@ -891,7 +1213,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                         if (n->updated & SC_UPDATE_V_SCROLL) InvalidateRect(overview_, nullptr, FALSE);
                         break;
                 }
-            } else if (hdr->hwndFrom == tree_ && hdr->code == TVN_SELCHANGEDW) {
+            } else if (hdr->hwndFrom == tree_ && hdr->code == TVN_SELCHANGEDW && !rebuildingTree_) {
                 const auto* tv = reinterpret_cast<const NMTREEVIEWW*>(lp);
                 const auto i = static_cast<size_t>(tv->itemNew.lParam);
                 if (i < nodes_.size()) selectNode(nodes_[i]);
@@ -909,10 +1231,22 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
 
         case WM_CLOSE:
+            if (jobRunning_) {
+                if (MessageBoxW(hwnd_, L"The model is still indexing. Stop it and exit?", kAppName,
+                                MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+                    return 0;
+                cancelJob();
+                if (worker_.joinable()) worker_.join();
+                jobRunning_ = false;
+            }
             if (confirmDiscard()) DestroyWindow(hwnd_);
             return 0;
 
         case WM_DESTROY:
+            if (worker_.joinable()) {
+                cancelJob();
+                worker_.join();
+            }
             if (uiFont_) DeleteObject(uiFont_);
             if (images_) ImageList_Destroy(images_);
             PostQuitMessage(0);
