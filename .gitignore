@@ -30,3 +30,6 @@
 *.exe
 *.out
 *.app
+
+# Local-only test material (third-party prompts, not for the public repo)
+tests/fixtures/local/

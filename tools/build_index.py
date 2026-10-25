@@ -1,0 +1,173 @@
+"""Build a topic index from a quote-based spec.
+
+The spec is what a human or an LLM writes: topics and subtopics whose ranges
+are given as quotes from the document. LLMs are good at quoting text and bad at
+counting characters, so the spec never contains offsets. This tool resolves
+each quote against the document and emits the full index the editor reads:
+byte offsets, exact text, and prefix/suffix context for re-anchoring.
+
+Spec range forms:
+    {"quote": "exact text"}                    the range is the quote itself
+    {"from": "start text", "to": "end text"}   from the start of `from` through
+                                               the end of the first `to` after it
+    either form may add "occurrence": n        (1-based) when the text repeats
+
+Usage:
+    py tools/build_index.py <document> <spec.json> <out.index.json>
+"""
+
+import hashlib
+import json
+import re
+import sys
+
+CONTEXT_CHARS = 32
+PALETTE = ["#4FC3F7", "#FFB74D", "#81C784", "#E57373", "#BA68C8",
+           "#FFF176", "#4DB6AC", "#F06292", "#A1887F", "#90A4AE"]
+
+
+class SpecError(Exception):
+    pass
+
+
+def find_all(text, needle):
+    hits, i = [], text.find(needle)
+    while i != -1:
+        hits.append(i)
+        i = text.find(needle, i + 1)
+    return hits
+
+
+def pick(hits, needle, occurrence, where):
+    if not hits:
+        raise SpecError(f"{where}: not found: {needle!r}")
+    if occurrence is None:
+        if len(hits) > 1:
+            raise SpecError(f"{where}: {len(hits)} matches, add \"occurrence\": {needle!r}")
+        return hits[0]
+    if not 1 <= occurrence <= len(hits):
+        raise SpecError(f"{where}: occurrence {occurrence} of {len(hits)}: {needle!r}")
+    return hits[occurrence - 1]
+
+
+def resolve(text, spec, where):
+    """Returns (start, end) as character offsets into text."""
+    occurrence = spec.get("occurrence")
+    if "quote" in spec:
+        start = pick(find_all(text, spec["quote"]), spec["quote"], occurrence, where)
+        return start, start + len(spec["quote"])
+    start = pick(find_all(text, spec["from"]), spec["from"], occurrence, where)
+    end = text.find(spec["to"], start)
+    if end == -1:
+        raise SpecError(f"{where}: 'to' not found after 'from': {spec['to']!r}")
+    return start, end + len(spec["to"])
+
+
+class ByteOffsets:
+    """Maps character offsets to UTF-8 byte offsets, which is what Scintilla uses."""
+
+    def __init__(self, text):
+        self.prefix_bytes = [0]
+        for ch in text:
+            self.prefix_bytes.append(self.prefix_bytes[-1] + len(ch.encode("utf-8")))
+
+    def __getitem__(self, char_offset):
+        return self.prefix_bytes[char_offset]
+
+
+def build_range(text, offsets, spec, where, covered):
+    start, end = resolve(text, spec, where)
+    covered.append((start, end))
+    return {
+        "start": offsets[start],
+        "end": offsets[end],
+        "exact": text[start:end],
+        "prefix": text[max(0, start - CONTEXT_CHARS):start],
+        "suffix": text[end:end + CONTEXT_CHARS],
+        "touched": False,
+    }
+
+
+def build_node(text, offsets, spec, where, covered, color):
+    node = {"id": spec["id"], "name": spec["name"], "color": spec.get("color", color)}
+    if "note" in spec:
+        node["note"] = spec["note"]
+    node["ranges"] = [build_range(text, offsets, r, f"{where} range {i + 1}", covered)
+                      for i, r in enumerate(spec.get("ranges", []))]
+    return node
+
+
+STRUCTURE_LINE = re.compile(r"^(#+ .*|[-*+]|\d+[.)])$")
+
+
+def is_structure(chunk):
+    """True when a gap holds only markdown scaffolding: headings, bullets, list numbers."""
+    return all(STRUCTURE_LINE.match(line.strip())
+               for line in chunk.splitlines() if line.strip())
+
+
+def unindexed_gaps(text, offsets, covered):
+    """Text outside every range that is more than whitespace and markdown structure."""
+    gaps, pos = [], 0
+    for start, end in sorted(covered) + [(len(text), len(text))]:
+        if start > pos:
+            chunk = text[pos:start]
+            stripped = chunk.strip()
+            if stripped and not is_structure(chunk):
+                lead = len(chunk) - len(chunk.lstrip())
+                gaps.append({"start": offsets[pos + lead],
+                             "end": offsets[pos + lead + len(stripped)],
+                             "exact": stripped})
+        pos = max(pos, end)
+    return gaps
+
+
+def build_index(doc_path, spec):
+    with open(doc_path, "rb") as f:
+        raw = f.read()
+    text = raw.decode("utf-8")
+    offsets = ByteOffsets(text)
+    covered = []
+    topics = []
+    for i, tspec in enumerate(spec["topics"]):
+        where = f"topic {tspec['id']}"
+        topic = build_node(text, offsets, tspec, where, covered, PALETTE[i % len(PALETTE)])
+        topic["subtopics"] = [
+            build_node(text, offsets, sspec, f"{where}/{sspec['id']}", covered, topic["color"])
+            for sspec in tspec.get("subtopics", [])
+        ]
+        topics.append(topic)
+    return {
+        "version": 1,
+        "document": spec.get("document", doc_path),
+        "documentHash": "sha256:" + hashlib.sha256(raw).hexdigest(),
+        "offsetUnit": "utf8-byte",
+        "topics": topics,
+        "unindexed": unindexed_gaps(text, offsets, covered),
+    }
+
+
+def main(argv):
+    if len(argv) != 4:
+        print(__doc__)
+        return 2
+    _, doc_path, spec_path, out_path = argv
+    with open(spec_path, encoding="utf-8") as f:
+        spec = json.load(f)
+    try:
+        index = build_index(doc_path, spec)
+    except SpecError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(index, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    n_ranges = sum(len(t["ranges"]) + sum(len(s["ranges"]) for s in t["subtopics"])
+                   for t in index["topics"])
+    print(f"{len(index['topics'])} topics, {n_ranges} ranges, "
+          f"{len(index['unindexed'])} unindexed gaps -> {out_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
