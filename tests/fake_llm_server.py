@@ -3,7 +3,7 @@
 It plays the model's part in the pipeline with simple rules: findings name the
 lines that contain the topic's first word, the format step returns those lines
 plus one quote that does not exist (so a repair round happens), and the repair
-step returns the lines alone. It requires an API key, can reject the
+step fixes that quote (or, with --unfixable, does not). It requires an API key, can reject the
 json_schema response format once, and can be slowed down to test cancelling.
 
 Usage: py tests/fake_llm_server.py [--port 9099] [--key test-key] [--delay 0] [--reject-schema]
@@ -46,10 +46,12 @@ def reply_for(messages):
     if "Find every part" in last:
         lines = matching_lines(messages)
         return f"<think>looking for {topic_of(messages)}</think>Found the topic on lines {lines}."
+    if "could not be matched" in last:
+        # With --unfixable the bad quote stays bad, so it ends up lost.
+        return json.dumps({"fixes": [] if ARGS.unfixable else [{"id": "r1", "lines": "1"}]})
     lines = matching_lines(messages)
     ranges = [{"lines": str(n), "line": n} for n in lines]
-    if "exact format the editor uses" in last:
-        ranges.append({"quote": "This sentence is not in the document anywhere at all.", "line": 1})
+    ranges.append({"quote": "This sentence is not in the document anywhere at all.", "line": 1})
     doc = {"name": topic_of(messages), "note": "", "ranges": ranges[:1],
            "subtopics": [{"name": "Mentions", "note": "", "ranges": ranges[1:]}] if len(ranges) > 1 else []}
     return "```json\n" + json.dumps(doc) + "\n```"
@@ -104,6 +106,7 @@ if __name__ == "__main__":
     p.add_argument("--key", default="test-key")
     p.add_argument("--delay", type=float, default=0)
     p.add_argument("--reject-schema", action="store_true")
+    p.add_argument("--unfixable", action="store_true", help="never fix the bad quote")
     ARGS = p.parse_args()
     print(f"fake LLM on http://127.0.0.1:{ARGS.port}/v1", flush=True)
     ThreadingHTTPServer(("127.0.0.1", ARGS.port), Handler).serve_forever()

@@ -19,8 +19,12 @@ changes.
   prompt or reset it to its default. **Index > Rebuild index with the model**
   (Ctrl+R) asks for the topic list (or has the model propose one) and then
   indexes each topic in its own conversation: the model reports every passage
-  on the topic, converts its findings into ranges, and fixes any range that
-  does not match the document. Progress shows at the bottom; Cancel stops it.
+  on the topic, then converts its findings into ranges. Only ranges that do not
+  match the document go back to it to fix, one by one; anything still unmatched
+  is listed under **Lost ranges** below the topics, where you select the
+  passage in the document and click **Place at selection**, or **Discard** it.
+  **Show the model's analysis** (Ctrl+I) shows what the model wrote about the
+  selected topic before converting it. Progress shows at the bottom; Cancel stops it.
   **Rebuild selected topic** redoes one topic. Settings live in
   `%APPDATA%\PromptEditor` (the key encrypted for your Windows account) and
   transcripts of each run in `%LOCALAPPDATA%\PromptEditor\runs`.

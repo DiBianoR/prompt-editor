@@ -30,6 +30,7 @@ enum : int {
     IDM_REBUILD_TOPIC,
     IDM_CANCEL_INDEXING,
     IDM_SETTINGS,
+    IDM_SHOW_ANALYSIS,
     IDC_TREE = 200,
     IDC_EDITOR,
     IDC_PREV_BUTTON,
@@ -40,6 +41,9 @@ enum : int {
     IDC_LOG_EDIT,
     IDC_LOG_CANCEL,
     IDC_LOG_CLOSE,
+    IDC_REVIEW_LIST,
+    IDC_REVIEW_PLACE,
+    IDC_REVIEW_DISCARD,
 };
 
 constexpr UINT WM_APP_REFRESH = WM_APP + 1;
@@ -140,6 +144,8 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(indexMenu, MF_STRING, IDM_REBUILD_TOPIC, L"Rebuild selected &topic");
     AppendMenuW(indexMenu, MF_STRING, IDM_CANCEL_INDEXING, L"&Cancel indexing");
     AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(indexMenu, MF_STRING, IDM_SHOW_ANALYSIS, L"Show the model's &analysis\tCtrl+I");
+    AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(indexMenu, MF_STRING, IDM_SETTINGS, L"LLM &settings...");
     HMENU bar = CreateMenu();
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
@@ -157,6 +163,7 @@ bool MainWindow::create(HINSTANCE instance, int show) {
         {FCONTROL | FVIRTKEY, '1', IDM_FOCUS_TOPICS},
         {FCONTROL | FVIRTKEY, '2', IDM_FOCUS_EDITOR},
         {FCONTROL | FVIRTKEY, 'R', IDM_REBUILD},
+        {FCONTROL | FVIRTKEY, 'I', IDM_SHOW_ANALYSIS},
     };
     accel_ = CreateAcceleratorTableW(keys, ARRAYSIZE(keys));
 
@@ -212,6 +219,26 @@ void MainWindow::createChildren() {
                                  reinterpret_cast<HMENU>(IDC_LOG_CANCEL), instance_, nullptr);
     logClose_ = CreateWindowExW(0, WC_BUTTONW, L"Hide", WS_CHILD | WS_TABSTOP, 0, 0, 0, 0, hwnd_,
                                 reinterpret_cast<HMENU>(IDC_LOG_CLOSE), instance_, nullptr);
+    // Lost ranges, under the tree; shown only when there are some.
+    reviewLabel_ = CreateWindowExW(0, WC_STATICW, nullptr, WS_CHILD | SS_LEFT | SS_NOPREFIX, 0, 0, 0, 0, hwnd_,
+                                   nullptr, instance_, nullptr);
+    reviewList_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, nullptr,
+                                  WS_CHILD | WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS |
+                                      LVS_NOSORTHEADER,
+                                  0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_REVIEW_LIST), instance_, nullptr);
+    ListView_SetExtendedListViewStyle(reviewList_, LVS_EX_FULLROWSELECT | LVS_EX_INFOTIP | LVS_EX_DOUBLEBUFFER);
+    LVCOLUMNW col{};
+    col.mask = LVCF_TEXT | LVCF_WIDTH;
+    col.cx = 110;
+    col.pszText = const_cast<wchar_t*>(L"Topic");
+    ListView_InsertColumn(reviewList_, 0, &col);
+    col.cx = 400;
+    col.pszText = const_cast<wchar_t*>(L"Text the model named");
+    ListView_InsertColumn(reviewList_, 1, &col);
+    reviewPlace_ = CreateWindowExW(0, WC_BUTTONW, L"Place at selection", WS_CHILD | WS_TABSTOP, 0, 0, 0, 0, hwnd_,
+                                   reinterpret_cast<HMENU>(IDC_REVIEW_PLACE), instance_, nullptr);
+    reviewDiscard_ = CreateWindowExW(0, WC_BUTTONW, L"Discard", WS_CHILD | WS_TABSTOP, 0, 0, 0, 0, hwnd_,
+                                     reinterpret_cast<HMENU>(IDC_REVIEW_DISCARD), instance_, nullptr);
 
     sciFn_ = reinterpret_cast<SciFnDirect>(SendMessageW(editor_, SCI_GETDIRECTFUNCTION, 0, 0));
     sciPtr_ = static_cast<sptr_t>(SendMessageW(editor_, SCI_GETDIRECTPOINTER, 0, 0));
@@ -257,7 +284,8 @@ void MainWindow::updateFonts() {
     NONCLIENTMETRICSW ncm{sizeof ncm};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, dpi_);
     HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for (HWND w : {tree_, prevButton_, nextButton_, navLabel_, status_, logTitle_, logEdit_, logCancel_, logClose_})
+    for (HWND w : {tree_, prevButton_, nextButton_, navLabel_, status_, logTitle_, logEdit_, logCancel_, logClose_,
+                   reviewLabel_, reviewList_, reviewPlace_, reviewDiscard_})
         SendMessageW(w, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     if (uiFont_) DeleteObject(uiFont_);
     uiFont_ = font;
@@ -289,8 +317,20 @@ void MainWindow::layout() {
     int parts[] = {w / 2, w * 3 / 4 + scale(60), -1};
     SendMessageW(status_, SB_SETPARTS, 3, reinterpret_cast<LPARAM>(parts));
 
+    const int reviewH = lost_.empty() ? 0 : std::min(scale(240), h / 2);
+    if (reviewH) {
+        const int rowH = scale(26), labelH = scale(40), top = h - reviewH;
+        SetWindowPos(reviewLabel_, nullptr, pad, top + pad, tw - 2 * pad, labelH, SWP_NOZORDER);
+        SetWindowPos(reviewList_, nullptr, 0, top + labelH + pad, tw, reviewH - labelH - rowH - pad * 3, SWP_NOZORDER);
+        const int bw = (tw - pad * 3) / 2;
+        SetWindowPos(reviewPlace_, nullptr, pad, h - rowH - pad, bw, rowH, SWP_NOZORDER);
+        SetWindowPos(reviewDiscard_, nullptr, pad * 2 + bw, h - rowH - pad, bw, rowH, SWP_NOZORDER);
+        ListView_SetColumnWidth(reviewList_, 1, std::max(scale(100), tw - scale(110) - GetSystemMetrics(SM_CXVSCROLL) - 4));
+        ListView_SetColumnWidth(reviewList_, 0, scale(110));
+    }
+
     HDWP dwp = BeginDeferWindowPos(6);
-    dwp = DeferWindowPos(dwp, tree_, nullptr, 0, 0, tw, h, SWP_NOZORDER);
+    dwp = DeferWindowPos(dwp, tree_, nullptr, 0, 0, tw, h - reviewH, SWP_NOZORDER);
     dwp = DeferWindowPos(dwp, prevButton_, nullptr, x + pad, pad, scale(96), navH - 2 * pad, SWP_NOZORDER);
     dwp = DeferWindowPos(dwp, nextButton_, nullptr, x + pad * 2 + scale(96), pad, scale(96), navH - 2 * pad,
                          SWP_NOZORDER);
@@ -507,6 +547,7 @@ void MainWindow::buildTree() {
     rebuildingTree_ = false;
     SendMessageW(tree_, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(tree_, nullptr, TRUE);
+    updateReview(true);
 }
 
 void MainWindow::relabelTree() {
@@ -666,7 +707,127 @@ void MainWindow::refresh() {
     relabelTree();
     updateNavLabel();
     updateStatus();
+    updateReview();
     InvalidateRect(overview_, nullptr, FALSE);
+}
+
+// ---- Lost ranges -------------------------------------------------------------
+
+pe::Topic& MainWindow::nodeTopic(int topic, int sub) {
+    pe::Topic& t = index_.topics[topic];
+    return sub < 0 ? t : t.subtopics[sub];
+}
+
+void MainWindow::updateReview(bool force) {
+    std::vector<LostRef> lost;
+    if (hasIndex_) {
+        for (int i = 0; i < static_cast<int>(index_.topics.size()); ++i)
+            for (int j = -1; j < static_cast<int>(index_.topics[i].subtopics.size()); ++j) {
+                const pe::Topic& t = nodeTopic(i, j);
+                for (size_t k = 0; k < t.ranges.size(); ++k)
+                    if (t.ranges[k].status == pe::AnchorStatus::Orphaned) lost.push_back({i, j, k});
+            }
+    }
+    if (!force && lost == lost_) return;
+    const bool wasShown = !lost_.empty();
+    const int selected = ListView_GetNextItem(reviewList_, -1, LVNI_SELECTED);
+    lost_ = std::move(lost);
+
+    SendMessageW(reviewList_, WM_SETREDRAW, FALSE, 0);
+    ListView_DeleteAllItems(reviewList_);
+    for (size_t i = 0; i < lost_.size(); ++i) {
+        const LostRef& l = lost_[i];
+        std::wstring topic = widen(index_.topics[l.topic].name);
+        if (l.sub >= 0) topic += L" › " + widen(index_.topics[l.topic].subtopics[l.sub].name);
+        std::wstring text = widen(nodeTopic(l.topic, l.sub).ranges[l.range].exact.substr(0, 400));
+        std::replace(text.begin(), text.end(), L'\n', L' ');
+        std::replace(text.begin(), text.end(), L'\r', L' ');
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = static_cast<int>(i);
+        item.pszText = topic.data();
+        ListView_InsertItem(reviewList_, &item);
+        ListView_SetItemText(reviewList_, static_cast<int>(i), 1, text.data());
+    }
+    if (!lost_.empty()) {
+        const int sel = std::clamp(selected, 0, static_cast<int>(lost_.size()) - 1);
+        ListView_SetItemState(reviewList_, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    }
+    SendMessageW(reviewList_, WM_SETREDRAW, TRUE, 0);
+    const std::wstring label = L"Lost ranges (" + std::to_wstring(lost_.size()) +
+                               L"): not found in the document. Select the passage in the document, then Place.";
+    SetWindowTextW(reviewLabel_, label.c_str());
+    if (wasShown != !lost_.empty()) {
+        for (HWND w : {reviewLabel_, reviewList_, reviewPlace_, reviewDiscard_})
+            ShowWindow(w, lost_.empty() ? SW_HIDE : SW_SHOW);
+        layout();
+    }
+}
+
+void MainWindow::placeLost() {
+    const int i = ListView_GetNextItem(reviewList_, -1, LVNI_SELECTED);
+    if (i < 0 || i >= static_cast<int>(lost_.size())) return;
+    const sptr_t a = sci(SCI_GETSELECTIONSTART), b = sci(SCI_GETSELECTIONEND);
+    if (a == b) {
+        MessageBoxW(hwnd_, L"Select the passage in the document first, then click Place at selection.", kAppName,
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const LostRef l = lost_[i];
+    const std::string doc = documentText();
+    pe::Range& r = nodeTopic(l.topic, l.sub).ranges[l.range];
+    r.start = static_cast<size_t>(a);
+    r.end = static_cast<size_t>(b);
+    r.exact = doc.substr(r.start, r.end - r.start);
+    r.prefix = pe::contextBefore(doc, r.start);
+    r.suffix = pe::contextAfter(doc, r.end);
+    r.status = pe::AnchorStatus::Exact;
+    r.touched = true;  // placed by hand since the last LLM refresh
+    writeIndexFile();
+    refresh();
+    selectTreeNode(l.topic, l.sub);
+}
+
+void MainWindow::discardLost() {
+    const int i = ListView_GetNextItem(reviewList_, -1, LVNI_SELECTED);
+    if (i < 0 || i >= static_cast<int>(lost_.size())) return;
+    if (MessageBoxW(hwnd_, L"Discard this lost range? It will be removed from the index.", kAppName,
+                    MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+        return;
+    const LostRef l = lost_[i];
+    hits_.clear();  // they point into the ranges being changed
+    current_ = -1;
+    auto& ranges = nodeTopic(l.topic, l.sub).ranges;
+    ranges.erase(ranges.begin() + static_cast<std::ptrdiff_t>(l.range));
+    writeIndexFile();
+    refresh();
+}
+
+void MainWindow::selectTreeNode(int topic, int sub) {
+    for (size_t i = 0; i < nodes_.size(); ++i)
+        if (nodes_[i].topic == topic && nodes_[i].sub == sub) {
+            TreeView_SelectItem(tree_, items_[i]);
+            if (selected_.topic == topic && selected_.sub == sub) selectNode(nodes_[i]);  // no change event
+            return;
+        }
+}
+
+void MainWindow::showAnalysis() {
+    if (!hasIndex_ || selected_.topic < 0) return;
+    const pe::Topic& t = index_.topics[selected_.topic];
+    if (t.analysis.empty()) {
+        MessageBoxW(hwnd_, L"This topic has no saved analysis. It is recorded when the model builds the topic.",
+                    kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const std::filesystem::path path = std::filesystem::u8path(t.analysis);
+    std::string text;
+    if (!readFile(path, text)) {
+        showError(hwnd_, L"The analysis file is no longer there:\n" + path.wstring());
+        return;
+    }
+    TextViewer viewer(L"The model's analysis: " + widen(t.name), widen(text), path.wstring());
+    viewer.show(hwnd_);
 }
 
 // ---- Labels --------------------------------------------------------------
@@ -938,12 +1099,18 @@ void MainWindow::startJob(Job job) {
                     const size_t palette = result->job.replaceTopic >= 0 ? result->job.replaceTopic : i;
                     try {
                         pe::TopicOutcome out = pe::indexTopic(*client, doc, topics[i], prompts, repairs, hooks);
-                        size_t ranges = out.topic.spans.size();
-                        for (const auto& s : out.topic.subtopics) ranges += s.spans.size();
+                        size_t ranges = out.topic.spans.size(), lost = out.topic.lost.size();
+                        for (const auto& s : out.topic.subtopics) {
+                            ranges += s.spans.size();
+                            lost += s.lost.size();
+                        }
                         log("  done: " + std::to_string(ranges) + " ranges, " +
-                            std::to_string(out.topic.subtopics.size()) + " subtopics");
-                        for (const std::string& d : out.dropped) log("  left out (never matched): " + d);
-                        result->topics.push_back(pe::toIndexTopic(out.topic, prev, used, palette));
+                            std::to_string(out.topic.subtopics.size()) + " subtopics" +
+                            (lost ? ", " + std::to_string(lost) + " lost (listed under the topics)" : ""));
+                        pe::Topic topic = pe::toIndexTopic(out.topic, prev, used, palette);
+                        topic.analysis =
+                            (result->folder / std::filesystem::u8path(out.analysisFile)).make_preferred().u8string();
+                        result->topics.push_back(std::move(topic));
                     } catch (const pe::Cancelled&) {
                         throw;
                     } catch (const std::exception& e) {
@@ -1034,14 +1201,18 @@ void MainWindow::onJobDone(JobResult* raw) {
     buildTree();
     refresh();
 
-    int ranges = 0, review = 0;
+    int ranges = 0, review = 0, lost = 0;
     index_.forEachRange([&](pe::Range& r) {
-        ++ranges;
-        review += pe::needsReview(r.status);
+        if (r.status == pe::AnchorStatus::Orphaned) {
+            ++lost;
+        } else {
+            ++ranges;
+            review += pe::needsReview(r.status);
+        }
     });
     appendLog(L"Done: " + std::to_wstring(index_.topics.size()) + L" topics, " + std::to_wstring(ranges) +
-              L" ranges, " + std::to_wstring(review) + L" to verify, " + std::to_wstring(gaps_.size()) +
-              L" unindexed passages, " + std::to_wstring(calls) + L" model calls" +
+              L" ranges, " + std::to_wstring(review) + L" to verify, " + std::to_wstring(lost) + L" lost, " +
+              std::to_wstring(gaps_.size()) + L" unindexed passages, " + std::to_wstring(calls) + L" model calls" +
               (result->failedTopics ? L", " + std::to_wstring(result->failedTopics) + L" topics failed" : L"") + L".");
     appendLog(transcripts);
 }
@@ -1170,6 +1341,9 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_LOG_CANCEL: cancelJob(); return 0;
                 case IDM_SETTINGS: openSettings(); return 0;
                 case IDC_LOG_CLOSE: showLog(false); return 0;
+                case IDM_SHOW_ANALYSIS: showAnalysis(); return 0;
+                case IDC_REVIEW_PLACE: placeLost(); return 0;
+                case IDC_REVIEW_DISCARD: discardLost(); return 0;
             }
             break;
 
@@ -1179,6 +1353,8 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             enable(IDM_REBUILD, !jobRunning_ && !docPath_.empty());
             enable(IDM_REBUILD_TOPIC, !jobRunning_ && hasIndex_ && selected_.topic >= 0);
             enable(IDM_CANCEL_INDEXING, jobRunning_);
+            enable(IDM_SHOW_ANALYSIS, hasIndex_ && selected_.topic >= 0 &&
+                                          !index_.topics[selected_.topic].analysis.empty());
             return 0;
         }
 
@@ -1217,6 +1393,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 const auto* tv = reinterpret_cast<const NMTREEVIEWW*>(lp);
                 const auto i = static_cast<size_t>(tv->itemNew.lParam);
                 if (i < nodes_.size()) selectNode(nodes_[i]);
+            } else if (hdr->hwndFrom == reviewList_ && hdr->code == NM_DBLCLK) {
+                // Show the topic the lost range belongs to, for context.
+                const int i = reinterpret_cast<const NMITEMACTIVATE*>(lp)->iItem;
+                if (i >= 0 && i < static_cast<int>(lost_.size())) selectTreeNode(lost_[i].topic, lost_[i].sub);
             } else if (hdr->hwndFrom == tree_ && hdr->code == TVN_GETINFOTIPW) {
                 auto* tip = reinterpret_cast<NMTVGETINFOTIPW*>(lp);
                 const auto i = static_cast<size_t>(tip->lParam);

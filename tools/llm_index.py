@@ -39,7 +39,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_index  # noqa: E402
-from resolve_quotes import Document, ResolveError, merge_spans, resolve_range  # noqa: E402
+from resolve_quotes import Document, ResolveError, clean_quote, merge_spans, resolve_range  # noqa: E402
 
 TOOLS = Path(__file__).resolve().parent
 PROMPTS = TOOLS / "prompts"
@@ -175,6 +175,12 @@ TOPIC_SCHEMA = {
     }),
     "required": ["name", "ranges", "subtopics"],
 }
+REPAIR_SCHEMA = {
+    "type": "object",
+    "properties": {"fixes": {"type": "array", "items": {
+        "type": "object", "properties": dict(RANGE_SCHEMA["properties"], id={"type": "string"}), "required": ["id"]}}},
+    "required": ["fixes"],
+}
 
 
 def parse_json_reply(text):
@@ -191,36 +197,80 @@ def parse_json_reply(text):
 
 # ---- One topic ----------------------------------------------------------------
 
-def resolve_node(doc, node, path):
-    """Resolves a node's ranges. Returns (spans, failures)."""
-    spans, failures = [], []
-    ranges = node.get("ranges") or []
-    if not isinstance(ranges, list):
-        return [], [(path + ".ranges", "not a list", ranges)]
-    for i, item in enumerate(ranges):
-        try:
-            spans.append(resolve_range(doc, item))
-        except ResolveError as e:
-            failures.append((f"{path}.ranges[{i}]", str(e), item))
-    return spans, failures
-
-
 def resolve_topic(doc, obj):
     """Resolves the model's JSON for one topic. Returns (topic, failures) where
-    topic = {"name", "note", "spans", "subtopics": [{"name", "note", "spans"}]}."""
-    topic = {"name": str(obj.get("name") or "").strip(), "note": str(obj.get("note") or "").strip()}
-    topic["spans"], failures = resolve_node(doc, obj, "topic")
+    topic = {"name", "note", "spans", "lost", "subtopics": [{"name", "note", "spans", "lost"}]}
+    and each failure is {"id", "node" (None or subtopic index), "item", "reason"}."""
+    failures = []
+
+    def node(src, index):
+        n = {"name": str(src.get("name") or "").strip(), "note": str(src.get("note") or "").strip(),
+             "spans": [], "lost": []}
+        ranges = src.get("ranges")
+        for item in ranges if isinstance(ranges, list) else []:
+            try:
+                n["spans"].append(resolve_range(doc, item))
+            except ResolveError as e:
+                failures.append({"id": f"r{len(failures) + 1}", "node": index, "item": item, "reason": str(e)})
+        return n
+
+    topic = node(obj, None)
     topic["subtopics"] = []
-    subs = obj.get("subtopics") or []
-    for j, sub in enumerate(subs if isinstance(subs, list) else []):
-        if not isinstance(sub, dict):
-            failures.append((f"subtopics[{j}]", "not an object", sub))
-            continue
-        spans, fails = resolve_node(doc, sub, f"subtopics[{j}]")
-        failures += fails
-        topic["subtopics"].append({"name": str(sub.get("name") or f"Part {j + 1}").strip(),
-                                   "note": str(sub.get("note") or "").strip(), "spans": spans})
+    subs = obj.get("subtopics")
+    for sub in subs if isinstance(subs, list) else []:
+        if isinstance(sub, dict):
+            s = node(sub, len(topic["subtopics"]))
+            s["name"] = s["name"] or f"Part {len(topic['subtopics']) + 1}"
+            topic["subtopics"].append(s)
     return topic, failures
+
+
+def node_of(topic, index):
+    return topic if index is None else topic["subtopics"][index]
+
+
+def describe(item):
+    """How a range the model wrote reads to a person, for the lost list."""
+    if isinstance(item, dict):
+        if isinstance(item.get("quote"), str):
+            return clean_quote(item["quote"])
+        if isinstance(item.get("from"), str) and isinstance(item.get("to"), str):
+            return f"{clean_quote(item['from'])} … {clean_quote(item['to'])}"
+        if "lines" in item:
+            return f"lines {item['lines']}"
+    return json.dumps(item, ensure_ascii=False)
+
+
+def format_failures(doc, failures):
+    """The failures as the repair prompt lists them: id, reason, the range as
+    written, and the numbered lines around its line hint."""
+    out = []
+    for f in failures:
+        out.append(f"- {f['id']}: {f['reason']}\n  {json.dumps(f['item'], ensure_ascii=False)}")
+        line = f["item"].get("line") if isinstance(f["item"], dict) else None
+        if isinstance(line, int) and 1 <= line <= doc.line_count:
+            near = doc.numbered().split("\n")[max(0, line - 3):line + 2]
+            out.append(f"  Lines near {line}:\n" + "\n".join("    " + n for n in near))
+    return "\n".join(out)
+
+
+def apply_fixes(doc, reply, topic, failures):
+    """Applies the model's fixes to the open failures; returns those still open."""
+    fixes = reply.get("fixes")
+    if isinstance(fixes, dict):  # tolerate {"r1": {...}}
+        fixes = [dict(v, id=k) for k, v in fixes.items() if isinstance(v, dict)]
+    by_id = {f["id"]: f for f in failures}
+    for fix in fixes if isinstance(fixes, list) else []:
+        f = by_id.get(fix.get("id")) if isinstance(fix, dict) else None
+        if not f:
+            continue
+        try:
+            node_of(topic, f["node"])["spans"].append(resolve_range(doc, fix))
+            del by_id[f["id"]]
+        except ResolveError as e:
+            f["item"], f["reason"] = fix, str(e)
+            print(f"    {f['id']} still unmatched: {e}")
+    return list(by_id.values())
 
 
 def clean_topic(doc, topic):
@@ -231,17 +281,13 @@ def clean_topic(doc, topic):
     covered = [(s, e) for sub in topic["subtopics"] for s, e, _ in sub["spans"]]
     topic["spans"] = [sp for sp in merge_spans(topic["spans"], doc.text)
                       if not any(s <= sp[0] and sp[1] <= e for s, e in covered)]
-    topic["subtopics"] = [s for s in topic["subtopics"] if s["spans"]]
+    topic["subtopics"] = [s for s in topic["subtopics"] if s["spans"] or s["lost"]]
     return topic
 
 
-def format_failures(failures):
-    return "\n".join(f"- {where}: {reason}\n  {json.dumps(item, ensure_ascii=False)}"
-                     for where, reason, item in failures)
-
-
 def index_topic(llm, doc, name, hint, repairs, run_dir):
-    """Runs find, format and repair for one topic. Returns (topic, dropped failures)."""
+    """Runs find, format and repair for one topic. Returns (topic, lost) where
+    lost lists the ranges that never matched (also kept in the topic)."""
     run_dir.mkdir(parents=True, exist_ok=True)
     messages = [system_message(), {"role": "user", "content": render(
         "find_topic.md", DOCUMENT=doc.numbered(), TOPIC=name,
@@ -251,38 +297,50 @@ def index_topic(llm, doc, name, hint, repairs, run_dir):
     (run_dir / "1-findings.md").write_text(findings, encoding="utf-8")
     print(f"    found in {time.time() - t:.0f}s ({len(findings)} chars of findings)")
 
+    # Step 2: the whole topic as JSON. Retried only if the reply is not JSON at all.
     messages += [{"role": "assistant", "content": findings},
                  {"role": "user", "content": render("format_topic.md", TOPIC=name)}]
-    topic, last_failures = None, []
+    obj = None
     for attempt in range(repairs + 1):
         t = time.time()
         reply = llm.chat(messages, schema=TOPIC_SCHEMA)
         (run_dir / f"2-format-{attempt}.json").write_text(reply, encoding="utf-8")
+        messages.append({"role": "assistant", "content": reply})
         try:
             obj = parse_json_reply(reply)
+            break
         except ValueError as e:
             print(f"    reply {attempt + 1} was not valid JSON ({e})")
-            messages += [{"role": "assistant", "content": reply}, {"role": "user", "content":
-                          f"That was not a valid JSON object ({e}). Reply with only the JSON object."}]
-            continue
-        candidate, failures = resolve_topic(doc, obj)
-        if topic is None or len(failures) <= len(last_failures):
-            topic, last_failures = candidate, failures
-        n = len(candidate["spans"]) + sum(len(s["spans"]) for s in candidate["subtopics"])
-        print(f"    formatted in {time.time() - t:.0f}s: {n} ranges resolved, {len(failures)} failed")
+            messages.append({"role": "user", "content":
+                             f"That was not a valid JSON object ({e}). Reply with only the JSON object."})
+    if obj is None:
+        raise LLMError(f"no usable JSON for topic {name!r}")
+    topic, failures = resolve_topic(doc, obj)
+    n = len(topic["spans"]) + sum(len(s["spans"]) for s in topic["subtopics"])
+    print(f"    formatted in {time.time() - t:.0f}s: {n} ranges matched, {len(failures)} unmatched")
+
+    # Step 3: only the unmatched ranges go back, each by id; matched ones stay as they are.
+    for i in range(repairs):
         if not failures:
             break
-        if attempt < repairs:
-            messages += [{"role": "assistant", "content": reply},
-                         {"role": "user", "content": render("repair.md", FAILURES=format_failures(failures))}]
-    if topic is None:
-        raise LLMError(f"no usable JSON for topic {name!r}")
+        messages.append({"role": "user", "content": render("repair.md", FAILURES=format_failures(doc, failures))})
+        reply = llm.chat(messages, schema=REPAIR_SCHEMA)
+        (run_dir / f"3-repair-{i}.json").write_text(reply, encoding="utf-8")
+        messages.append({"role": "assistant", "content": reply})
+        before = len(failures)
+        try:
+            failures = apply_fixes(doc, parse_json_reply(reply), topic, failures)
+        except ValueError as e:
+            print(f"    repair reply was not valid JSON ({e})")
+        print(f"    fixed {before - len(failures)}, {len(failures)} still unmatched")
+    for f in failures:
+        node_of(topic, f["node"])["lost"].append(describe(f["item"]))
+
     topic["name"] = name  # the topic list's name wins over the model's rewording
     topic = clean_topic(doc, topic)
     (run_dir / "3-result.json").write_text(json.dumps(
-        {"topic": topic, "dropped": [list(f) for f in last_failures]},
-        ensure_ascii=False, indent=2), encoding="utf-8")
-    return topic, last_failures
+        {"topic": topic, "lost": failures}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return topic, failures
 
 
 # ---- Topics -------------------------------------------------------------------
@@ -338,14 +396,14 @@ def byte_to_char(text):
     return table
 
 
-def spans_spec(spans):
+def spans_spec(spans, lost=()):
     out = []
     for s, e, status in spans:
         r = {"span": [s, e]}
         if status in ("fuzzy", "ambiguous"):
             r["status"] = status
         out.append(r)
-    return out
+    return out + [{"lost": text} for text in lost]
 
 
 def existing_topic_spec(text, topic):
@@ -353,11 +411,13 @@ def existing_topic_spec(text, topic):
     b2c = byte_to_char(text)
     def node(t):
         n = {"id": t["id"], "name": t["name"], "color": t.get("color", "")}
-        if t.get("note"):
-            n["note"] = t["note"]
-        n["ranges"] = [dict({"span": [b2c[r["start"]], b2c[r["end"]]]},
+        for key in ("note", "analysis"):
+            if t.get(key):
+                n[key] = t[key]
+        n["ranges"] = [{"lost": r["exact"]} if r.get("status") == "orphaned" else
+                       dict({"span": [b2c[r["start"]], b2c[r["end"]]]},
                             **({"status": r["status"]} if r.get("status") else {}))
-                       for r in t["ranges"] if r.get("status") != "orphaned"]
+                       for r in t["ranges"]]
         return n
     spec = node(topic)
     spec["subtopics"] = [node(s) for s in topic.get("subtopics", [])]
@@ -370,18 +430,20 @@ def new_topic_spec(topic, old_by_name, used_ids):
     while tid in used_ids:
         tid += "-2"
     used_ids.add(tid)
-    spec = {"id": tid, "name": topic["name"], "ranges": spans_spec(topic["spans"])}
+    spec = {"id": tid, "name": topic["name"], "ranges": spans_spec(topic["spans"], topic["lost"])}
     if old and old.get("color"):
         spec["color"] = old["color"]
     if topic["note"]:
         spec["note"] = topic["note"]
+    if topic.get("analysis"):
+        spec["analysis"] = topic["analysis"]
     spec["subtopics"] = []
     for sub in topic["subtopics"]:
         sid = f"{tid}.{slug(sub['name'])}"
         while sid in used_ids:
             sid += "-2"
         used_ids.add(sid)
-        s = {"id": sid, "name": sub["name"], "ranges": spans_spec(sub["spans"])}
+        s = {"id": sid, "name": sub["name"], "ranges": spans_spec(sub["spans"], sub["lost"])}
         if sub["note"]:
             s["note"] = sub["note"]
         spec["subtopics"].append(s)
@@ -488,18 +550,19 @@ def cmd_build(args):
     if not topics:
         sys.exit("no topics to index")
 
-    results, dropped = [], []
+    results, lost, failed = [], [], []
     for i, (name, hint) in enumerate(topics):
         print(f"[{i + 1}/{len(topics)}] {name}")
+        topic_dir = run_dir / f"{i + 1:02d}-{slug(name)}"
         try:
-            topic, fails = index_topic(llm, doc, name, hint, args.repairs,
-                                       run_dir / f"{i + 1:02d}-{slug(name)}")
+            topic, fails = index_topic(llm, doc, name, hint, args.repairs, topic_dir)
         except LLMError as e:
             print(f"    FAILED: {e}")
-            dropped.append((name, "topic", str(e), None))
+            failed.append(name)
             continue
+        topic["analysis"] = str((topic_dir / "1-findings.md").resolve())
         results.append(topic)
-        dropped += [(name, *f) for f in fails]
+        lost += [(name, describe(f["item"]), f["reason"]) for f in fails]
 
     used_ids = set()
     if args.only:
@@ -525,10 +588,12 @@ def cmd_build(args):
     print(f"\n{out_path}: {len(index['topics'])} topics, "
           + ", ".join(f"{v} {k}" for k, v in sorted(statuses.items()))
           + f", {len(index['unindexed'])} unindexed passages; {llm.calls} LLM calls")
-    if dropped:
-        print(f"{len(dropped)} ranges could not be matched and were left out:")
-        for name, where, reason, _ in dropped:
-            print(f"  {name} {where}: {reason}")
+    if lost:
+        print(f"{len(lost)} ranges could not be matched; they are kept as lost for you to place in the editor:")
+        for name, text, reason in lost:
+            print(f"  {name}: {text[:80]!r} ({reason})")
+    if failed:
+        print(f"{len(failed)} topics failed and were left out: {', '.join(failed)}")
     for g in index["unindexed"][:10]:
         print(f"  unindexed: {g['exact'][:100]!r}")
     print(f"details: {run_dir}")

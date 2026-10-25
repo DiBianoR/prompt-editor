@@ -326,6 +326,31 @@ void SettingsDialog::collect() {
         if (edited_[p.id] != p.text) settings_.promptOverrides[p.id] = edited_[p.id];
 }
 
+// ---- TextViewer ----
+
+void TextViewer::onCreate() {
+    edit_ = add(WC_EDITW, toEdit(text_).c_str(),
+                WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_NOHIDESEL, 0,
+                WS_EX_CLIENTEDGE);
+    SendMessageW(edit_, EM_SETLIMITTEXT, 1 << 22, 0);
+    SetWindowTextW(edit_, toEdit(text_).c_str());
+    source_label_ = add(WC_STATICW, source_.c_str(), SS_LEFT | SS_NOPREFIX | SS_PATHELLIPSIS);
+    close_ = add(WC_BUTTONW, L"Close", WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK);
+    SetFocus(edit_);
+}
+
+void TextViewer::onLayout(int width, int height) {
+    const int m = scale(12), gap = scale(8), rowH = scale(26);
+    const int buttonsY = height - m - rowH;
+    place(edit_, m, m, width - 2 * m, buttonsY - gap - m);
+    place(source_label_, m, buttonsY + scale(4), width - 3 * m - scale(90), rowH);
+    place(close_, width - m - scale(90), buttonsY, scale(90), rowH);
+}
+
+void TextViewer::onCommand(int id, int) {
+    if (id == IDOK || id == IDCANCEL) end(id);
+}
+
 // ---- TopicsDialog ----
 
 TopicsDialog::Result TopicsDialog::show(HWND owner) {

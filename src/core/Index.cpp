@@ -38,6 +38,7 @@ Topic parseTopic(const json& j, const std::string& inheritedColor) {
     t.color = optString(j, "color");
     if (t.color.empty()) t.color = inheritedColor;
     t.note = optString(j, "note");
+    t.analysis = optString(j, "analysis");
     if (auto it = j.find("ranges"); it != j.end())
         for (const json& r : *it) t.ranges.push_back(parseRange(r));
     return t;
@@ -62,6 +63,7 @@ json topicJson(const Topic& t, bool withSubtopics) {
     j["name"] = t.name;
     j["color"] = t.color;
     if (!t.note.empty()) j["note"] = t.note;
+    if (!t.analysis.empty()) j["analysis"] = t.analysis;
     j["ranges"] = json::array();
     for (const Range& r : t.ranges) j["ranges"].push_back(rangeJson(r));
     if (withSubtopics) {

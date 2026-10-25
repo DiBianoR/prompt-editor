@@ -39,6 +39,7 @@ struct Topic {
     std::string note;
     std::vector<Range> ranges;
     std::vector<Topic> subtopics;  // one level only
+    std::string analysis;          // path of the model's findings for this topic, if any
 };
 
 // Document text that no topic claims.

@@ -157,10 +157,9 @@ void testFindFormatRepair() {
                                               {"ranges", json::array({{{"quote", "Ask before sending email."}, {"line", 9}},
                                                                       {{"quote", "Always ask before you send any emails at all."},
                                                                        {"line", 10}}})}}})}};
-    json fixed = first;
-    fixed["subtopics"][0]["ranges"][1] = {{"lines", "10"}};
+    const std::string fix = R"({"fixes": [{"id": "r1", "lines": "10"}]})";
     FakeLLM llm({"<think>scanning</think>Lines 6, 9 and 10 are about asking first.",
-                 "```json\n" + first.dump() + "\n```", fixed.dump()});
+                 "```json\n" + first.dump() + "\n```", fix});
     std::vector<std::string> log, saved;
     PipelineHooks hooks;
     hooks.log = [&](const std::string& m) { log.push_back(m); };
@@ -173,26 +172,44 @@ void testFindFormatRepair() {
     CHECK(llm.sent[0][1].content.find("(asking the user before acting)") != std::string::npos);
     CHECK(llm.sent[0][1].content.find(" 6| - Never run destructive") != std::string::npos);
     CHECK(!llm.schemas[0] && llm.schemas[1] && llm.schemas[2]);
-    // The model's findings stay in the conversation, and the repair quotes the failure back.
+    // The model's findings stay in the conversation.
     CHECK(llm.sent[1][2].role == "assistant" && llm.sent[1][2].content == "Lines 6, 9 and 10 are about asking first.");
-    CHECK(llm.sent[2].back().content.find("Always ask before you send any emails") != std::string::npos);
-    CHECK(out.dropped.empty());
+    // The repair lists only the failed range, by id, with the lines around its hint.
+    const std::string& repair = llm.sent[2].back().content;
+    CHECK(repair.find("r1:") != std::string::npos);
+    CHECK(repair.find("Always ask before you send any emails") != std::string::npos);
+    CHECK(repair.find("10| - Ask before sending email.") != std::string::npos);
+    CHECK(repair.find("Never run destructive") == std::string::npos);
+    CHECK(repair.find("- r2:") == std::string::npos);
+    CHECK(out.topic.lost.empty() && out.topic.subtopics[0].lost.empty());
     CHECK(out.topic.spans.size() == 1);
     CHECK(out.topic.subtopics.size() == 1);
     CHECK(out.topic.subtopics[0].note == "Stated twice.");
     CHECK(out.topic.subtopics[0].spans.size() == 2);
-    CHECK(saved.size() == 3 && saved[0] == "asking-first/1-findings.md");
+    CHECK(out.analysisFile == "asking-first/1-findings.md");
+    CHECK(saved.size() == 3 && saved[0] == "asking-first/1-findings.md" && saved[2] == "asking-first/3-repair-0.json");
 }
 
-void testGivesUpAfterRepairs() {
-    json bad = {{"name", "X"}, {"ranges", json::array({{{"quote", "This sentence is nowhere in the document at all."}}})},
+void testUnfixableIsKeptAsLost() {
+    json bad = {{"name", "X"},
+                {"ranges", json::array({{{"lines", "4"}}, {{"quote", "This sentence is nowhere in the document at all."}}})},
                 {"subtopics", json::array()}};
-    FakeLLM llm({"findings", "not json", bad.dump(), bad.dump()});
+    FakeLLM llm({"findings", "not json", bad.dump(), R"({"fixes": []})",
+                 R"({"fixes": [{"id": "r1", "quote": "Still not in the document, sorry about that."}]})"});
     TopicOutcome out = indexTopic(llm, doc(), {"X", ""}, defaultPromptSet(), 2, {});
-    CHECK(llm.sent.size() == 4);
+    CHECK(llm.sent.size() == 5);
     CHECK(llm.sent[2].back().content.find("not a valid JSON object") != std::string::npos);
-    CHECK(out.dropped.size() == 1);
-    CHECK(out.topic.spans.empty());
+    CHECK(out.topic.spans.size() == 1);  // the matched range survived both repair rounds
+    CHECK(out.topic.lost.size() == 1);
+    CHECK(out.topic.lost[0].text == "Still not in the document, sorry about that.");
+
+    std::set<std::string> used;
+    Topic t = toIndexTopic(out.topic, nullptr, used, 0);
+    CHECK(t.ranges.size() == 2);
+    CHECK(t.ranges[1].status == AnchorStatus::Orphaned && t.ranges[1].exact == out.topic.lost[0].text);
+    Index index = assembleIndex("agent.md", kDoc, {t});
+    CHECK(index.topics[0].ranges[1].status == AnchorStatus::Orphaned);  // kept through assembly
+    CHECK(parseIndex(serializeIndex(index)).topics[0].ranges[1].status == AnchorStatus::Orphaned);
 }
 
 void testCancel() {
@@ -209,9 +226,9 @@ void testCancel() {
 }
 
 void testAssemble() {
-    TopicSpans tools{"Tools", "", {resolve({{"lines", "4-6"}})}, {}};
-    tools.subtopics.push_back({"Git", "", {resolve({{"quote", "destructive git"}, {"line", 6}})}, {}});
-    TopicSpans safety{"Safety", "check", {resolve({{"quote", "Ask before sending email."}})}, {}};
+    TopicSpans tools{"Tools", "", {resolve({{"lines", "4-6"}})}, {}, {}};
+    tools.subtopics.push_back({"Git", "", {resolve({{"quote", "destructive git"}, {"line", 6}})}, {}, {}});
+    TopicSpans safety{"Safety", "check", {resolve({{"quote", "Ask before sending email."}})}, {}, {}};
     Index previous;
     previous.topics.push_back({"safety-rules", "Safety", "#123456", "", {}, {}});
     std::set<std::string> used;
@@ -244,7 +261,7 @@ int main() {
         {"reply parsing", testReplyParsing},
         {"prompts", testPrompts},
         {"find, format, repair", testFindFormatRepair},
-        {"gives up after repairs", testGivesUpAfterRepairs},
+        {"unfixable is kept as lost", testUnfixableIsKeptAsLost},
         {"cancel", testCancel},
         {"assemble", testAssemble},
     };

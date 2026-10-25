@@ -14,6 +14,8 @@ Spec range forms:
     {"span": [start, end]}                     character offsets, for tools that
                                                already resolved the text
     any form may add "status"                  e.g. "fuzzy", carried into the index
+    {"lost": "text"}                           a range not found in the document,
+                                               kept for the user to place
 
 Usage:
     py tools/build_index.py <document> <spec.json> <out.index.json>
@@ -84,6 +86,9 @@ class ByteOffsets:
 
 
 def build_range(text, offsets, spec, where, covered):
+    if "lost" in spec:
+        return {"start": 0, "end": 0, "exact": spec["lost"], "prefix": "", "suffix": "",
+                "touched": False, "status": "orphaned"}
     start, end = resolve(text, spec, where)
     covered.append((start, end))
     out = {
@@ -101,8 +106,9 @@ def build_range(text, offsets, spec, where, covered):
 
 def build_node(text, offsets, spec, where, covered, color):
     node = {"id": spec["id"], "name": spec["name"], "color": spec.get("color", color)}
-    if "note" in spec:
-        node["note"] = spec["note"]
+    for key in ("note", "analysis"):
+        if key in spec:
+            node[key] = spec[key]
     node["ranges"] = [build_range(text, offsets, r, f"{where} range {i + 1}", covered)
                       for i, r in enumerate(spec.get("ranges", []))]
     return node

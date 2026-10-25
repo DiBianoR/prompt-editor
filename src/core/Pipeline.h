@@ -16,8 +16,9 @@ namespace pe {
 
 // The LLM indexing pipeline, independent of how the model is reached. Each
 // topic is one conversation: the model first reports every passage on the
-// topic in its own words, then converts its findings into ranges; ranges that
-// do not match the document go back to it to fix.
+// topic in its own words, then converts its findings into ranges. Only the
+// ranges that do not match the document go back to it, one by one, to fix;
+// matched ranges are never resent. Whatever still fails is kept as lost.
 
 struct ChatMessage {
     std::string role;
@@ -57,16 +58,24 @@ struct TopicRequest {
     std::string hint;  // what belongs under the topic, optional
 };
 
+// A range the model named that could not be matched to the document, even after
+// repair. It is kept, as text, for the user to place or discard.
+struct LostRange {
+    std::string text;    // the model's quote, or "from ... to" ends
+    std::string reason;  // why it did not match
+};
+
 struct TopicSpans {
     std::string name;
     std::string note;
     std::vector<Span> spans;
+    std::vector<LostRange> lost;
     std::vector<TopicSpans> subtopics;
 };
 
 struct TopicOutcome {
     TopicSpans topic;
-    std::vector<std::string> dropped;  // ranges that never matched, described
+    std::string analysisFile;  // name passed to hooks.save for the step 1 findings
 };
 
 struct PipelineHooks {
@@ -93,5 +102,6 @@ Topic toIndexTopic(const TopicSpans& spans, const Index* previous, std::set<std:
 Index assembleIndex(const std::string& documentName, const std::string& doc, std::vector<Topic> topics);
 
 const nlohmann::json& topicSchema();
+const nlohmann::json& repairSchema();
 
 }  // namespace pe

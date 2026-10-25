@@ -42,8 +42,9 @@ public:
     // [start, end) of 1-based line n, without its line ending.
     std::pair<size_t, size_t> lineSpan(size_t n) const;
     size_t lineOf(size_t offset) const;
-    // The document with right-aligned line numbers ("12| text"), for prompts.
-    std::string numbered() const;
+    // The document with right-aligned line numbers ("12| text"), for prompts;
+    // optionally only lines first..last.
+    std::string numbered(size_t first = 1, size_t last = 0) const;
 
 private:
     std::string text_;

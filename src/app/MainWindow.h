@@ -100,6 +100,21 @@ private:
     void showLog(bool show);
     void writeIndexFile();
 
+    // Lost ranges: named by the model or the index but not found in the
+    // document. Listed under the tree for the user to place or discard.
+    struct LostRef {
+        int topic;
+        int sub;  // -1: the topic itself
+        size_t range;
+        bool operator==(const LostRef& o) const { return topic == o.topic && sub == o.sub && range == o.range; }
+    };
+    pe::Topic& nodeTopic(int topic, int sub);
+    void updateReview(bool force = false);
+    void placeLost();
+    void discardLost();
+    void selectTreeNode(int topic, int sub);
+    void showAnalysis();
+
     HINSTANCE instance_ = nullptr;
     HWND hwnd_ = nullptr;
     HWND tree_ = nullptr;
@@ -147,4 +162,10 @@ private:
     HWND logEdit_ = nullptr;
     HWND logCancel_ = nullptr;
     HWND logClose_ = nullptr;
+
+    std::vector<LostRef> lost_;
+    HWND reviewLabel_ = nullptr;
+    HWND reviewList_ = nullptr;
+    HWND reviewPlace_ = nullptr;
+    HWND reviewDiscard_ = nullptr;
 };

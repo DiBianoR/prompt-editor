@@ -128,37 +128,61 @@ class PipelineTests(unittest.TestCase):
                             {"quote": "Always ask before you send any emails at all.", "line": 10}]},
             ],
         }
-        fixed = json.loads(json.dumps(first))
-        fixed["subtopics"][0]["ranges"][1] = {"lines": "10"}
         llm = FakeLLM([
             "<think>scanning</think>Lines 6, 9 and 10 are about asking first.",
             "```json\n" + json.dumps(first) + "\n```",
-            json.dumps(fixed),
+            json.dumps({"fixes": [{"id": "r1", "lines": "10"}]}),
         ])
         with tempfile.TemporaryDirectory() as tmp:
-            topic, dropped = llm_index.index_topic(llm, doc, "Asking first", "", 2, Path(tmp) / "t")
+            topic, lost = llm_index.index_topic(llm, doc, "Asking first", "", 2, Path(tmp) / "t")
             self.assertTrue((Path(tmp) / "t" / "3-result.json").exists())
-        self.assertEqual(dropped, [])
+        self.assertEqual(lost, [])
         self.assertEqual(llm.calls, 3)
-        # The repair request quoted the failing range back to the model.
-        self.assertIn("Always ask before you send any emails", llm.sent[2][-1]["content"])
+        # The repair lists only the failed range, by id, with the lines around its hint.
+        repair = llm.sent[2][-1]["content"]
+        self.assertIn("- r1:", repair)
+        self.assertIn("Always ask before you send any emails", repair)
+        self.assertIn("10| - Ask before sending email.", repair)
+        self.assertNotIn("Never run destructive", repair)
+        self.assertNotIn("- r2:", repair)
         self.assertEqual(len(topic["spans"]), 1)
         email = topic["subtopics"][0]
         self.assertEqual(email["note"], "Stated twice.")
         self.assertEqual([doc.line_of(s) for s, _, _ in email["spans"]], [9, 10])
+
+    def test_unfixable_is_kept_as_lost(self):
+        doc = Document(DOC)
+        bad = {"name": "X", "subtopics": [],
+               "ranges": [{"lines": "4"}, {"quote": "This sentence is nowhere in the document at all."}]}
+        llm = FakeLLM(["findings", "not json", json.dumps(bad), '{"fixes": []}',
+                       '{"fixes": [{"id": "r1", "quote": "Still not in the document, sorry about that."}]}'])
+        with tempfile.TemporaryDirectory() as tmp:
+            topic, lost = llm_index.index_topic(llm, doc, "X", "", 2, Path(tmp) / "t")
+            self.assertEqual(llm.calls, 5)
+            self.assertEqual(len(topic["spans"]), 1)  # the matched range survived both rounds
+            self.assertEqual(topic["lost"], ["Still not in the document, sorry about that."])
+            doc_path = Path(tmp) / "agent.md"
+            doc_path.write_bytes(DOC.encode("utf-8"))
+            spec = llm_index.new_topic_spec(topic, {}, set())
+            index = llm_index.write_index(doc_path, Path(tmp) / "agent.index.json", [spec])
+            orphan = index["topics"][0]["ranges"][-1]
+            self.assertEqual(orphan["status"], "orphaned")
+            self.assertEqual(orphan["exact"], "Still not in the document, sorry about that.")
 
     def test_build_writes_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             doc_path = Path(tmp) / "agent.md"
             doc_path.write_bytes(DOC.encode("utf-8"))
             doc = Document(DOC)
-            topic = {"name": "Tools", "note": "", "spans": [resolve_range(doc, {"lines": "4-6"})],
-                     "subtopics": [{"name": "Git", "note": "",
+            topic = {"name": "Tools", "note": "", "spans": [resolve_range(doc, {"lines": "4-6"})], "lost": [],
+                     "analysis": "C:/runs/tools/1-findings.md",
+                     "subtopics": [{"name": "Git", "note": "", "lost": [],
                                     "spans": [resolve_range(doc, {"quote": "destructive git", "line": 6})]}]}
             spec = llm_index.new_topic_spec(llm_index.clean_topic(doc, topic), {}, set())
             index = llm_index.write_index(doc_path, Path(tmp) / "agent.index.json", [spec])
             t = index["topics"][0]
             self.assertEqual(t["id"], "tools")
+            self.assertEqual(t["analysis"], "C:/runs/tools/1-findings.md")
             self.assertEqual(t["subtopics"][0]["id"], "tools.git")
             self.assertEqual(t["subtopics"][0]["color"], t["color"])
             raw = DOC.encode("utf-8")

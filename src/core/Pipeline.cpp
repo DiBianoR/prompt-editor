@@ -58,58 +58,116 @@ std::string str(const nlohmann::json& obj, const char* key) {
     return it != obj.end() && it->is_string() ? trim(it->get<std::string>()) : std::string();
 }
 
+// A range that did not match, waiting for repair. `node` is -1 for the topic
+// itself, else the index of its subtopic.
 struct Failure {
-    std::string where, reason, item;
+    std::string id;  // "r1", "r2", ... as shown to the model
+    int node;
+    nlohmann::json item;
+    std::string reason;
 };
 
-std::vector<Span> resolveNode(const SourceDocument& doc, const nlohmann::json& node, const std::string& path,
-                              std::vector<Failure>& failures) {
-    std::vector<Span> spans;
-    auto it = node.find("ranges");
-    if (it == node.end() || it->is_null()) return spans;
-    if (!it->is_array()) {
-        failures.push_back({path + ".ranges", "not a list", it->dump()});
-        return spans;
-    }
-    for (size_t i = 0; i < it->size(); ++i) {
+void resolveNode(const SourceDocument& doc, const nlohmann::json& obj, int node, TopicSpans& into,
+                 std::vector<Failure>& failures) {
+    auto it = obj.find("ranges");
+    if (it == obj.end() || !it->is_array()) return;
+    for (const nlohmann::json& item : *it) {
         try {
-            spans.push_back(resolveRange(doc, (*it)[i]));
+            into.spans.push_back(resolveRange(doc, item));
         } catch (const ResolveError& e) {
-            failures.push_back({path + ".ranges[" + std::to_string(i) + "]", e.what(), (*it)[i].dump()});
+            failures.push_back({"r" + std::to_string(failures.size() + 1), node, item, e.what()});
         }
     }
-    return spans;
 }
 
 TopicSpans resolveTopic(const SourceDocument& doc, const nlohmann::json& obj, std::vector<Failure>& failures) {
     TopicSpans t;
     t.name = str(obj, "name");
     t.note = str(obj, "note");
-    t.spans = resolveNode(doc, obj, "topic", failures);
+    resolveNode(doc, obj, -1, t, failures);
     auto subs = obj.find("subtopics");
     if (subs != obj.end() && subs->is_array()) {
         for (size_t j = 0; j < subs->size(); ++j) {
             const nlohmann::json& sub = (*subs)[j];
-            const std::string path = "subtopics[" + std::to_string(j) + "]";
-            if (!sub.is_object()) {
-                failures.push_back({path, "not an object", sub.dump()});
-                continue;
-            }
+            if (!sub.is_object()) continue;
             TopicSpans s;
             s.name = str(sub, "name");
             if (s.name.empty()) s.name = "Part " + std::to_string(j + 1);
             s.note = str(sub, "note");
-            s.spans = resolveNode(doc, sub, path, failures);
             t.subtopics.push_back(std::move(s));
+            resolveNode(doc, sub, static_cast<int>(t.subtopics.size()) - 1, t.subtopics.back(), failures);
         }
     }
     return t;
 }
 
+TopicSpans& nodeOf(TopicSpans& t, int node) { return node < 0 ? t : t.subtopics[node]; }
+
 size_t countSpans(const TopicSpans& t) {
     size_t n = t.spans.size();
     for (const TopicSpans& s : t.subtopics) n += s.spans.size();
     return n;
+}
+
+// How a range the model wrote reads to a person, for the lost list.
+std::string describe(const nlohmann::json& item) {
+    if (item.is_object()) {
+        if (auto q = item.find("quote"); q != item.end() && q->is_string()) return cleanQuote(q->get<std::string>());
+        auto from = item.find("from"), to = item.find("to");
+        if (from != item.end() && to != item.end() && from->is_string() && to->is_string())
+            return cleanQuote(from->get<std::string>()) + " \xE2\x80\xA6 " + cleanQuote(to->get<std::string>());
+        if (auto l = item.find("lines"); l != item.end())
+            return "lines " + (l->is_string() ? l->get<std::string>() : l->dump());
+    }
+    return item.dump();
+}
+
+// The failures as the repair prompt lists them: id, reason, the range as
+// written, and the numbered lines around its line hint.
+std::string formatFailures(const SourceDocument& doc, const std::vector<Failure>& failures) {
+    std::string out;
+    for (const Failure& f : failures) {
+        out += "- " + f.id + ": " + f.reason + "\n  " + f.item.dump() + "\n";
+        auto hint = f.item.is_object() ? f.item.find("line") : f.item.end();
+        if (f.item.is_object() && hint != f.item.end() && hint->is_number_integer()) {
+            const long long line = hint->get<long long>();
+            if (line >= 1 && static_cast<size_t>(line) <= doc.lineCount()) {
+                const size_t a = static_cast<size_t>(std::max<long long>(1, line - 2));
+                out += "  Lines near " + std::to_string(line) + ":\n";
+                std::string near = doc.numbered(a, static_cast<size_t>(line) + 2);
+                for (size_t i = 0; (i = near.find('\n', i)) != std::string::npos; i += 5) near.insert(i + 1, "    ");
+                out += "    " + near + "\n";
+            }
+        }
+    }
+    return out;
+}
+
+// Applies the model's fixes to the open failures; fixed ones are removed.
+void applyFixes(const SourceDocument& doc, const nlohmann::json& reply, TopicSpans& topic,
+                std::vector<Failure>& failures, const PipelineHooks& hooks) {
+    // {"fixes": [{"id": "r1", ...range}]}, or tolerate {"fixes": {"r1": {...}}}.
+    std::vector<std::pair<std::string, nlohmann::json>> fixes;
+    if (auto it = reply.find("fixes"); it != reply.end()) {
+        if (it->is_array()) {
+            for (const nlohmann::json& f : *it)
+                if (f.is_object() && f.contains("id") && f["id"].is_string()) fixes.emplace_back(f["id"].get<std::string>(), f);
+        } else if (it->is_object()) {
+            for (const auto& [id, f] : it->items()) fixes.emplace_back(id, f);
+        }
+    }
+    for (const auto& [id, fix] : fixes) {
+        auto f = std::find_if(failures.begin(), failures.end(), [&](const Failure& x) { return x.id == id; });
+        if (f == failures.end() || !fix.is_object()) continue;
+        try {
+            nodeOf(topic, f->node).spans.push_back(resolveRange(doc, fix));
+            failures.erase(f);
+        } catch (const ResolveError& e) {
+            f->item = fix;
+            f->reason = e.what();
+            say(hooks, "  " + id + " still unmatched: " + e.what());
+        }
+    }
 }
 
 // Merges overlapping spans, removes top-level spans a subtopic already covers,
@@ -129,14 +187,8 @@ void cleanTopic(const SourceDocument& doc, TopicSpans& t) {
     }
     t.spans = std::move(kept);
     t.subtopics.erase(std::remove_if(t.subtopics.begin(), t.subtopics.end(),
-                                     [](const TopicSpans& s) { return s.spans.empty(); }),
+                                     [](const TopicSpans& s) { return s.spans.empty() && s.lost.empty(); }),
                       t.subtopics.end());
-}
-
-std::string formatFailures(const std::vector<Failure>& failures) {
-    std::string out;
-    for (const Failure& f : failures) out += "- " + f.where + ": " + f.reason + "\n  " + f.item + "\n";
-    return out;
 }
 
 const PromptInfo* findPrompt(const std::string& id) {
@@ -222,6 +274,26 @@ const nlohmann::json& topicSchema() {
                               {"items", {{"type", "object"}, {"properties", nodeProps}, {"required", {"name", "ranges"}}}}};
         return nlohmann::json{{"type", "object"}, {"properties", props}, {"required", {"name", "ranges", "subtopics"}}};
     }();
+    return schema;
+}
+
+const nlohmann::json& repairSchema() {
+    static const nlohmann::json schema = {
+        {"type", "object"},
+        {"properties",
+         {{"fixes",
+           {{"type", "array"},
+            {"items",
+             {{"type", "object"},
+              {"properties",
+               {{"id", {{"type", "string"}}},
+                {"lines", {{"type", "string"}}},
+                {"quote", {{"type", "string"}}},
+                {"from", {{"type", "string"}}},
+                {"to", {{"type", "string"}}},
+                {"line", {{"type", "integer"}}}}},
+              {"required", {"id"}}}}}}}},
+        {"required", {"fixes"}}};
     return schema;
 }
 
@@ -323,46 +395,56 @@ TopicOutcome indexTopic(ChatClient& llm, const SourceDocument& doc, const TopicR
     messages.push_back({"assistant", findings});
     messages.push_back({"user", render(prompt(prompts, "format_topic"), {{"TOPIC", request.name}})});
 
-    bool have = false;
-    TopicSpans best;
-    std::vector<Failure> bestFailures;
-    for (int attempt = 0; attempt <= repairs; ++attempt) {
+    // Step 2: the whole topic as JSON. Retried only if the reply is not JSON at all.
+    nlohmann::json obj;
+    bool parsed = false;
+    for (int attempt = 0; attempt <= repairs && !parsed; ++attempt) {
         checkCancel(hooks);
-        say(hooks, attempt == 0 ? "  converting to ranges..." : "  fixing unmatched ranges...");
+        say(hooks, "  converting to ranges...");
         const std::string reply = stripThinking(llm.chat(messages, &topicSchema()));
         if (hooks.save) hooks.save(prefix + "2-format-" + std::to_string(attempt) + ".json", reply);
-        nlohmann::json obj;
+        messages.push_back({"assistant", reply});
         try {
             obj = extractJsonObject(reply);
+            parsed = true;
         } catch (const std::exception& e) {
             say(hooks, std::string("  reply was not valid JSON (") + e.what() + ")");
-            messages.push_back({"assistant", reply});
             messages.push_back({"user", std::string("That was not a valid JSON object (") + e.what() +
                                             "). Reply with only the JSON object."});
-            continue;
-        }
-        std::vector<Failure> failures;
-        TopicSpans candidate = resolveTopic(doc, obj, failures);
-        say(hooks, "  " + std::to_string(countSpans(candidate)) + " ranges matched, " +
-                       std::to_string(failures.size()) + " unmatched");
-        if (!have || failures.size() <= bestFailures.size()) {
-            best = std::move(candidate);
-            bestFailures = failures;
-            have = true;
-        }
-        if (failures.empty()) break;
-        if (attempt < repairs) {
-            messages.push_back({"assistant", reply});
-            messages.push_back({"user", render(prompt(prompts, "repair"), {{"FAILURES", formatFailures(failures)}})});
         }
     }
-    if (!have) throw std::runtime_error("no usable JSON for topic \"" + request.name + "\"");
+    if (!parsed) throw std::runtime_error("no usable JSON for topic \"" + request.name + "\"");
 
-    best.name = request.name;  // the topic list's name wins over the model's rewording
-    cleanTopic(doc, best);
-    TopicOutcome outcome{std::move(best), {}};
-    for (const Failure& f : bestFailures) outcome.dropped.push_back(f.where + ": " + f.reason);
-    return outcome;
+    std::vector<Failure> failures;
+    TopicSpans topic = resolveTopic(doc, obj, failures);
+    say(hooks, "  " + std::to_string(countSpans(topic)) + " ranges matched, " + std::to_string(failures.size()) +
+                   " unmatched");
+
+    // Step 3: only the unmatched ranges go back, each by id; matched ones stay as they are.
+    for (int round = 0; round < repairs && !failures.empty(); ++round) {
+        checkCancel(hooks);
+        say(hooks, "  asking the model to fix " + std::to_string(failures.size()) + " unmatched ranges...");
+        messages.push_back({"user", render(prompt(prompts, "repair"), {{"FAILURES", formatFailures(doc, failures)}})});
+        const std::string reply = stripThinking(llm.chat(messages, &repairSchema()));
+        if (hooks.save) hooks.save(prefix + "3-repair-" + std::to_string(round) + ".json", reply);
+        messages.push_back({"assistant", reply});
+        const size_t before = failures.size();
+        try {
+            applyFixes(doc, extractJsonObject(reply), topic, failures, hooks);
+        } catch (const std::exception& e) {
+            say(hooks, std::string("  repair reply was not valid JSON (") + e.what() + ")");
+        }
+        say(hooks, "  fixed " + std::to_string(before - failures.size()) + ", " + std::to_string(failures.size()) +
+                       " still unmatched");
+    }
+    for (const Failure& f : failures) {
+        nodeOf(topic, f.node).lost.push_back({describe(f.item), f.reason});
+        say(hooks, "  kept as lost: " + describe(f.item).substr(0, 80));
+    }
+
+    topic.name = request.name;  // the topic list's name wins over the model's rewording
+    cleanTopic(doc, topic);
+    return {std::move(topic), prefix + "1-findings.md"};
 }
 
 // ---- Assembly ----
@@ -378,14 +460,23 @@ Topic toIndexTopic(const TopicSpans& spans, const Index* previous, std::set<std:
     topic.name = spans.name;
     topic.color = old && !old->color.empty() ? old->color : kPalette[paletteIndex % std::size(kPalette)];
     topic.note = spans.note;
-    for (const Span& s : spans.spans) topic.ranges.push_back(toRange(s));
+    auto addRanges = [](Topic& to, const TopicSpans& from) {
+        for (const Span& s : from.spans) to.ranges.push_back(toRange(s));
+        for (const LostRange& l : from.lost) {
+            Range r;  // no place in the document yet; the user places or discards it
+            r.exact = l.text;
+            r.status = AnchorStatus::Orphaned;
+            to.ranges.push_back(r);
+        }
+    };
+    addRanges(topic, spans);
     for (const TopicSpans& sub : spans.subtopics) {
         Topic st;
         st.id = uniqueId(topic.id + "." + slug(sub.name), usedIds);
         st.name = sub.name;
         st.color = topic.color;
         st.note = sub.note;
-        for (const Span& s : sub.spans) st.ranges.push_back(toRange(s));
+        addRanges(st, sub);
         topic.subtopics.push_back(std::move(st));
     }
     return topic;

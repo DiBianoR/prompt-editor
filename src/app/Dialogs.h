@@ -78,5 +78,21 @@ private:
     HWND info_{}, edit_{}, propose_{}, build_{}, cancel_{};
 };
 
+// Read-only text, such as the model's analysis of a topic.
+class TextViewer : public ModalWindow {
+public:
+    TextViewer(std::wstring title, std::wstring text, std::wstring source)
+        : title_(std::move(title)), text_(std::move(text)), source_(std::move(source)) {}
+    void show(HWND owner) { run(owner, title_.c_str(), 820, 680); }
+
+private:
+    void onCreate() override;
+    void onLayout(int width, int height) override;
+    void onCommand(int id, int code) override;
+
+    std::wstring title_, text_, source_;
+    HWND edit_{}, source_label_{}, close_{};
+};
+
 std::wstring widen(const std::string& s);
 std::string narrow(const std::wstring& s);

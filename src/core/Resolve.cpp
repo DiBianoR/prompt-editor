@@ -179,16 +179,17 @@ size_t SourceDocument::lineOf(size_t offset) const {
     return std::upper_bound(lineStarts_.begin(), lineStarts_.end(), offset) - lineStarts_.begin();
 }
 
-std::string SourceDocument::numbered() const {
+std::string SourceDocument::numbered(size_t first, size_t last) const {
     const size_t width = std::to_string(lineCount()).size();
+    first = std::max<size_t>(first, 1);
+    last = last == 0 ? lineCount() : std::min(last, lineCount());
     std::string out;
-    out.reserve(text_.size() + lineCount() * (width + 3));
-    for (size_t n = 1; n <= lineCount(); ++n) {
+    for (size_t n = first; n <= last; ++n) {
         const std::string num = std::to_string(n);
         out.append(width - num.size(), ' ').append(num).append("| ");
         const auto [a, b] = lineSpan(n);
         out.append(text_, a, b - a);
-        if (n < lineCount()) out.push_back('\n');
+        if (n < last) out.push_back('\n');
     }
     return out;
 }
