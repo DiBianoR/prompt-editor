@@ -40,5 +40,12 @@ build/
 # LLM settings (holds the API key) and run transcripts
 tools/llm.local.json
 *.llm-runs/
-*.index.json.bak
 __pycache__/
+
+# Your prompts' indexes and topic lists: they quote your prompts and record
+# local paths. Dummy ones meant for the repo end in .example and are kept,
+# e.g. agent.index.json.example, agent.topics.txt.example.
+*.index.json
+*.index.json.bak
+*.topics.txt
+!*.example
