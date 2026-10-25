@@ -11,6 +11,9 @@ Spec range forms:
     {"from": "start text", "to": "end text"}   from the start of `from` through
                                                the end of the first `to` after it
     either form may add "occurrence": n        (1-based) when the text repeats
+    {"span": [start, end]}                     character offsets, for tools that
+                                               already resolved the text
+    any form may add "status"                  e.g. "fuzzy", carried into the index
 
 Usage:
     py tools/build_index.py <document> <spec.json> <out.index.json>
@@ -52,6 +55,11 @@ def pick(hits, needle, occurrence, where):
 
 def resolve(text, spec, where):
     """Returns (start, end) as character offsets into text."""
+    if "span" in spec:
+        start, end = spec["span"]
+        if not 0 <= start < end <= len(text):
+            raise SpecError(f"{where}: span out of range: {spec['span']}")
+        return start, end
     occurrence = spec.get("occurrence")
     if "quote" in spec:
         start = pick(find_all(text, spec["quote"]), spec["quote"], occurrence, where)
@@ -78,7 +86,7 @@ class ByteOffsets:
 def build_range(text, offsets, spec, where, covered):
     start, end = resolve(text, spec, where)
     covered.append((start, end))
-    return {
+    out = {
         "start": offsets[start],
         "end": offsets[end],
         "exact": text[start:end],
@@ -86,6 +94,9 @@ def build_range(text, offsets, spec, where, covered):
         "suffix": text[end:end + CONTEXT_CHARS],
         "touched": False,
     }
+    if spec.get("status"):
+        out["status"] = spec["status"]
+    return out
 
 
 def build_node(text, offsets, spec, where, covered, color):

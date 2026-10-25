@@ -36,3 +36,9 @@ tests/fixtures/local/
 
 # CMake build output
 build/
+
+# LLM settings (holds the API key) and run transcripts
+tools/llm.local.json
+*.llm-runs/
+*.index.json.bak
+__pycache__/
