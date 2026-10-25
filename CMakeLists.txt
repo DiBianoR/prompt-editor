@@ -28,6 +28,10 @@ target_include_directories(pecore PUBLIC ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_
 target_compile_options(pecore PRIVATE /W4 /EHsc)
 target_link_libraries(pecore PUBLIC bcrypt)
 
+add_executable(PromptEditor WIN32 src/app/main.cpp src/app/MainWindow.cpp)
+target_compile_options(PromptEditor PRIVATE /W4 /EHsc)
+target_link_libraries(PromptEditor PRIVATE pecore scintilla comctl32 comdlg32 shell32)
+
 add_executable(core_tests tests/core_tests.cpp)
 target_compile_options(core_tests PRIVATE /W4 /EHsc)
 target_link_libraries(core_tests PRIVATE pecore)
