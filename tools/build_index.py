@@ -100,24 +100,28 @@ def build_node(text, offsets, spec, where, covered, color):
 STRUCTURE_LINE = re.compile(r"^(#+ .*|[-*+]|\d+[.)])$")
 
 
-def is_structure(chunk):
-    """True when a gap holds only markdown scaffolding: headings, bullets, list numbers."""
-    return all(STRUCTURE_LINE.match(line.strip())
-               for line in chunk.splitlines() if line.strip())
-
-
 def unindexed_gaps(text, offsets, covered):
-    """Text outside every range that is more than whitespace and markdown structure."""
+    """Text outside every range that is more than whitespace and markdown scaffolding
+    (headings, bare bullets, list numbers). Matches findUnindexed in src/core/Text.cpp."""
     gaps, pos = [], 0
     for start, end in sorted(covered) + [(len(text), len(text))]:
         if start > pos:
-            chunk = text[pos:start]
-            stripped = chunk.strip()
-            if stripped and not is_structure(chunk):
-                lead = len(chunk) - len(chunk.lstrip())
-                gaps.append({"start": offsets[pos + lead],
-                             "end": offsets[pos + lead + len(stripped)],
-                             "exact": stripped})
+            lines = []  # (start, end) of each non-blank line, trimmed
+            for m in re.finditer(r"[^\n]+", text[pos:start]):
+                a, b = pos + m.start(), pos + m.end()
+                while a < b and text[a].isspace():
+                    a += 1
+                while b > a and text[b - 1].isspace():
+                    b -= 1
+                if b > a:
+                    lines.append((a, b))
+            while lines and STRUCTURE_LINE.match(text[lines[0][0]:lines[0][1]]):
+                lines.pop(0)
+            while lines and STRUCTURE_LINE.match(text[lines[-1][0]:lines[-1][1]]):
+                lines.pop()
+            if lines:
+                a, b = lines[0][0], lines[-1][1]
+                gaps.append({"start": offsets[a], "end": offsets[b], "exact": text[a:b]})
         pos = max(pos, end)
     return gaps
 
