@@ -40,6 +40,7 @@ enum : int {
     IDM_FIT_RANGE,
     IDM_TIER_1,  // ..IDM_TIER_1 + 4 for tiers 1-5
     IDM_TIER_NONE = IDM_TIER_1 + 5,
+    IDM_DELETE_TOPIC,
     IDC_TREE = 200,
     IDC_EDITOR,
     IDC_PREV_BUTTON,
@@ -174,6 +175,7 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(indexMenu, MF_STRING, IDM_SHOW_ANALYSIS, L"Show the model's &analysis\tCtrl+I");
     AppendMenuW(indexMenu, MF_STRING, IDM_COVERAGE_CHART, L"Topic co&verage chart\tCtrl+G");
+    AppendMenuW(indexMenu, MF_STRING, IDM_DELETE_TOPIC, L"&Delete selected topic...\tDel in topics");
     AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(indexMenu, MF_STRING, IDM_SETTINGS, L"LLM &settings...");
     HMENU tierMenu = CreatePopupMenu();
@@ -996,11 +998,46 @@ void MainWindow::setCurrentTier(int tier) {
                             : L"Tier cleared");
 }
 
+void MainWindow::deleteSelectedTopic() {
+    if (!hasIndex_ || selected_.topic < 0 || jobRunning_) return;
+    const NodeRef node = selected_;
+    pe::Topic& topic = nodeTopic(node.topic, node.sub);
+    size_t passages = topic.ranges.size();
+    for (const pe::Topic& s : topic.subtopics) passages += s.ranges.size();
+    std::wstring what = (node.sub < 0 ? L"topic \"" : L"subtopic \"") + widen(topic.name) + L"\"";
+    if (node.sub < 0 && !topic.subtopics.empty())
+        what += L" and its " + std::to_wstring(topic.subtopics.size()) +
+                (topic.subtopics.size() == 1 ? L" subtopic" : L" subtopics");
+    const std::wstring question = L"Delete the " + what + L" (" + std::to_wstring(passages) +
+                                  (passages == 1 ? L" passage" : L" passages") +
+                                  L") from the index?\n\nThe document itself is not changed.";
+    if (MessageBoxW(hwnd_, question.c_str(), kAppName, MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK) return;
+
+    const std::wstring name = widen(topic.name);
+    hits_.clear();  // they point into the topic being removed
+    current_ = -1;
+    selected_ = {-1, -1};
+    if (node.sub < 0) {
+        index_.topics.erase(index_.topics.begin() + node.topic);
+    } else {
+        auto& subs = index_.topics[node.topic].subtopics;
+        subs.erase(subs.begin() + node.sub);
+    }
+    writeIndexFile();
+    buildTree();  // tree positions shift after a removal
+    refresh();
+    SendMessageW(status_, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>((L"Deleted " + name).c_str()));
+}
+
 LRESULT CALLBACK MainWindow::treeKeyProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
     // In the topic list, Left/Right step through the selected topic's passages
     // (Up/Down already move between topics and subtopics).
     if (msg == WM_KEYDOWN && (wp == VK_LEFT || wp == VK_RIGHT)) {
         reinterpret_cast<MainWindow*>(data)->next(wp == VK_RIGHT ? +1 : -1);
+        return 0;
+    }
+    if (msg == WM_KEYDOWN && wp == VK_DELETE) {
+        reinterpret_cast<MainWindow*>(data)->deleteSelectedTopic();
         return 0;
     }
     if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, treeKeyProc, 1);
@@ -1785,6 +1822,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_REMOVE_RANGE: removeCurrentRange(); return 0;
                 case IDM_FIT_RANGE: fitCurrentRange(); return 0;
                 case IDM_TIER_NONE: setCurrentTier(0); return 0;
+                case IDM_DELETE_TOPIC: deleteSelectedTopic(); return 0;
                 case IDC_REVIEW_PLACE: placeLost(); return 0;
                 case IDC_REVIEW_DISCARD: discardLost(); return 0;
             }
@@ -1799,6 +1837,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             enable(IDM_SHOW_ANALYSIS, hasIndex_ && selected_.topic >= 0 &&
                                           !index_.topics[selected_.topic].analysis.empty());
             enable(IDM_COVERAGE_CHART, hasIndex_);
+            enable(IDM_DELETE_TOPIC, hasIndex_ && selected_.topic >= 0 && !jobRunning_);
             enable(IDM_ADD_SELECTION, hasIndex_ && selected_.topic >= 0);
             const bool onPassage = current_ >= 0 && current_ < static_cast<int>(hits_.size()) && hits_[current_].range;
             enable(IDM_REMOVE_RANGE, onPassage);

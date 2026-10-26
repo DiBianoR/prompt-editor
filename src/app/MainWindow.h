@@ -77,6 +77,7 @@ private:
     void removeCurrentRange();
     void fitCurrentRange();
     void setCurrentTier(int tier);
+    void deleteSelectedTopic();
     void indexChangedByHand(const std::wstring& what);
     void showCoverageChart();
     const pe::Topic* topicOf(const NodeRef& node) const;

@@ -35,7 +35,8 @@ changes.
   selected topic (Ctrl+Shift+A), remove the current passage (Ctrl+Shift+Del),
   fit it to the selection (Ctrl+Shift+F), or set its tier (Alt+1..5, Alt+0 for
   none). In the topic list, Left/Right step through the passages like
-  Previous/Next. The list shows each topic's share of the document;
+  Previous/Next, and Delete removes the selected topic or subtopic from the
+  index (after asking; the document is not changed). The list shows each topic's share of the document;
   **Index > Topic coverage chart** (Ctrl+G) draws them as bars, biggest first.
 - Each topic is saved as soon as it is finished, so stopping a run (Cancel,
   closing the app, an error, even a crash) loses at most the topic in progress:
