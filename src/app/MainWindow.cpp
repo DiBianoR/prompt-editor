@@ -168,7 +168,7 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(nav, MF_STRING, IDM_FOCUS_TOPICS, L"Go to &topics\tCtrl+1");
     AppendMenuW(nav, MF_STRING, IDM_FOCUS_EDITOR, L"Go to &document\tCtrl+2");
     HMENU indexMenu = CreatePopupMenu();
-    AppendMenuW(indexMenu, MF_STRING, IDM_REBUILD, L"&Rebuild index with the model...\tCtrl+R");
+    AppendMenuW(indexMenu, MF_STRING, IDM_REBUILD, L"&Build index with the model...\tCtrl+R");
     AppendMenuW(indexMenu, MF_STRING, IDM_REBUILD_TOPIC, L"Rebuild selected &topic");
     AppendMenuW(indexMenu, MF_STRING, IDM_CANCEL_INDEXING, L"&Cancel indexing");
     AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
@@ -1346,7 +1346,7 @@ void MainWindow::rebuildIndexDialog(std::wstring topicsText) {
     if (topicsText.empty() && offerResume(topicsText)) return;
     if (topicsText.empty() && hasIndex_)
         for (const pe::Topic& t : index_.topics) topicsText += widen(t.name) + L"\n";
-    TopicsDialog dlg(topicsText);
+    TopicsDialog dlg(topicsText, hasIndex_ && !index_.topics.empty());
     const TopicsDialog::Result result = dlg.show(hwnd_);
     if (result == TopicsDialog::kPropose) {
         Job job;
@@ -1357,6 +1357,26 @@ void MainWindow::rebuildIndexDialog(std::wstring topicsText) {
         Job job;
         job.topics = pe::parseTopicLines(narrow(dlg.text()));
         if (!job.topics.empty()) startJob(std::move(job));
+    } else if (result == TopicsDialog::kBuildNew) {
+        // Only topics the index does not have yet; existing ones are left exactly as they are.
+        auto lower = [](std::string s) {
+            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        };
+        std::set<std::string> have;
+        for (const pe::Topic& t : index_.topics) have.insert(lower(t.name));
+        Job job;
+        job.replaceMode = true;
+        for (const pe::TopicRequest& t : pe::parseTopicLines(narrow(dlg.text())))
+            if (!have.count(lower(t.name))) job.topics.push_back(t);
+        if (job.topics.empty()) {
+            MessageBoxW(hwnd_, L"Every topic in the list is already in the index. Add new topics to the list, or "
+                               L"use Rebuild full index to redo them.",
+                        kAppName, MB_OK | MB_ICONINFORMATION);
+            rebuildIndexDialog(dlg.text());
+            return;
+        }
+        startJob(std::move(job));
     }
 }
 
@@ -1459,11 +1479,12 @@ void MainWindow::startJob(Job job) {
                 for (size_t i = 0; i < topics.size(); ++i) {
                     const size_t number = progress.completed.size() + 1;
                     log("[" + std::to_string(number) + "/" + std::to_string(total) + "] " + topics[i].name);
-                    // Colors follow the topic's place in the list (or in the index, for one topic).
+                    // Colors follow the topic's place in the list. When topics are added to an
+                    // index, a topic already there keeps its place, and new ones continue after it.
                     size_t palette = 0;
-                    const auto& order = progress.replaceMode ? std::vector<pe::TopicRequest>() : progress.topics;
-                    for (size_t k = 0; k < order.size(); ++k)
-                        if (order[k].name == topics[i].name) palette = k;
+                    for (size_t k = 0; k < progress.topics.size(); ++k)
+                        if (progress.topics[k].name == topics[i].name)
+                            palette = progress.replaceMode ? previous.topics.size() + k : k;
                     if (progress.replaceMode)
                         for (size_t k = 0; k < previous.topics.size(); ++k)
                             if (previous.topics[k].name == topics[i].name) palette = k;

@@ -16,8 +16,11 @@ changes.
 - Build it with a model from the app: **Index > LLM settings...** takes the
   endpoint of any OpenAI-compatible server (e.g. a local llama.cpp router at
   `http://host:port/v1`), the API key and the model, and lets you edit each
-  prompt or reset it to its default. **Index > Rebuild index with the model**
-  (Ctrl+R) asks for the topic list (or has the model propose one) and then
+  prompt or reset it to its default. **Index > Build index with the model**
+  (Ctrl+R) asks for the topic list (or has the model propose one, or propose
+  additional topics for an existing index). **Rebuild full index** redoes every
+  listed topic and drops the rest; **Build new topics only** builds just the
+  listed topics the index lacks and keeps everything else. The model then
   indexes each topic in its own conversation: the model reports every passage
   on the topic, then converts its findings into ranges. Only ranges that do not
   match the document go back to it to fix, one by one; anything still unmatched

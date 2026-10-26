@@ -70,8 +70,11 @@ private:
 // The topic list to index, one per line ("Name | what belongs under it").
 class TopicsDialog : public ModalWindow {
 public:
-    enum Result { kCancel = IDCANCEL, kBuild = IDOK, kPropose = 300 };
-    explicit TopicsDialog(std::wstring text) : text_(std::move(text)) {}
+    // kBuild rebuilds every listed topic and drops the rest; kBuildNew builds only
+    // listed topics the index does not have yet and keeps everything else.
+    enum Result { kCancel = IDCANCEL, kBuild = IDOK, kPropose = 300, kBuildNew = 301 };
+    // `hasTopics`: the index already has topics (offers "additional" and build-new).
+    TopicsDialog(std::wstring text, bool hasTopics) : text_(std::move(text)), hasTopics_(hasTopics) {}
     Result show(HWND owner);
     const std::wstring& text() const { return text_; }
 
@@ -81,7 +84,8 @@ private:
     void onCommand(int id, int code) override;
 
     std::wstring text_;
-    HWND info_{}, edit_{}, propose_{}, build_{}, cancel_{};
+    bool hasTopics_;
+    HWND info_{}, edit_{}, propose_{}, buildNew_{}, build_{}, cancel_{};
 };
 
 // Read-only text, such as the model's analysis of a topic.

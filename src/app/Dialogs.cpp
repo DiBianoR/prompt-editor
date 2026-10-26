@@ -491,42 +491,52 @@ void TextViewer::onCommand(int id, int) {
 // ---- TopicsDialog ----
 
 TopicsDialog::Result TopicsDialog::show(HWND owner) {
-    return static_cast<Result>(run(owner, L"Rebuild index", 620, 560));
+    return static_cast<Result>(run(owner, L"Build index", 780, 580));
 }
 
 void TopicsDialog::onCreate() {
     info_ = add(WC_STATICW,
-                L"Topics to index, one per line. Optionally add \" | \" and what belongs under the topic. "
-                L"Each topic is sent to the model separately, so this takes a while.",
+                hasTopics_
+                    ? L"Topics, one per line; optionally add \" | \" and what belongs under the topic. Rebuild full "
+                      L"index redoes every topic listed and drops the rest. Build new topics only builds the listed "
+                      L"topics the index does not have yet and keeps everything else."
+                    : L"Topics to index, one per line. Optionally add \" | \" and what belongs under the topic. "
+                      L"Each topic is sent to the model separately, so this takes a while.",
                 SS_LEFT);
     edit_ = add(WC_EDITW, toEdit(text_).c_str(),
                 WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN, 0, WS_EX_CLIENTEDGE);
     SendMessageW(edit_, WM_SETFONT, reinterpret_cast<WPARAM>(mono_), FALSE);
-    propose_ = add(WC_BUTTONW, L"Propose topics with the model", WS_TABSTOP | BS_PUSHBUTTON, IDC_PROPOSE);
-    build_ = add(WC_BUTTONW, L"Build index", WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK);
+    propose_ = add(WC_BUTTONW, hasTopics_ ? L"Propose additional topics" : L"Propose topics with the model",
+                   WS_TABSTOP | BS_PUSHBUTTON, IDC_PROPOSE);
+    if (hasTopics_) buildNew_ = add(WC_BUTTONW, L"Build new topics only", WS_TABSTOP | BS_PUSHBUTTON, kBuildNew);
+    build_ = add(WC_BUTTONW, hasTopics_ ? L"Rebuild full index" : L"Build index", WS_TABSTOP | BS_DEFPUSHBUTTON, IDOK);
     cancel_ = add(WC_BUTTONW, L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, IDCANCEL);
     SetFocus(edit_);
 }
 
 void TopicsDialog::onLayout(int width, int height) {
-    const int m = scale(12), gap = scale(8), rowH = scale(26);
-    place(info_, m, m, width - 2 * m, scale(40));
+    const int m = scale(12), gap = scale(8), rowH = scale(26), infoH = scale(56);
+    const int cancelW = scale(90), buildW = scale(150);
+    place(info_, m, m, width - 2 * m, infoH);
     const int buttonsY = height - m - rowH;
-    place(edit_, m, m + scale(44), width - 2 * m, buttonsY - gap - m - scale(44));
-    place(propose_, m, buttonsY, scale(220), rowH);
-    place(cancel_, width - m - scale(90), buttonsY, scale(90), rowH);
-    place(build_, width - m - scale(90) - gap - scale(110), buttonsY, scale(110), rowH);
+    place(edit_, m, m + infoH + scale(4), width - 2 * m, buttonsY - gap - m - infoH - scale(4));
+    place(propose_, m, buttonsY, scale(200), rowH);
+    int x = width - m - cancelW;
+    place(cancel_, x, buttonsY, cancelW, rowH);
+    x -= gap + buildW;
+    place(build_, x, buttonsY, buildW, rowH);
+    if (buildNew_) place(buildNew_, x - gap - buildW, buttonsY, buildW, rowH);
 }
 
 void TopicsDialog::onCommand(int id, int) {
-    if (id == IDOK || id == IDC_PROPOSE) {
+    if (id == IDOK || id == kBuildNew || id == IDC_PROPOSE) {
         text_ = fromEdit(textOf(edit_));
-        if (id == IDOK && trimmed(narrow(text_)).empty()) {
-            MessageBoxW(hwnd_, L"Add at least one topic, or let the model propose some.", L"Rebuild index",
+        if (id != IDC_PROPOSE && trimmed(narrow(text_)).empty()) {
+            MessageBoxW(hwnd_, L"Add at least one topic, or let the model propose some.", L"Build index",
                         MB_OK | MB_ICONINFORMATION);
             return;
         }
-        end(id == IDOK ? kBuild : kPropose);
+        end(id == IDC_PROPOSE ? kPropose : id == kBuildNew ? kBuildNew : kBuild);
     } else if (id == IDCANCEL) {
         end(kCancel);
     }
