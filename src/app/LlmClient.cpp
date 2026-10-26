@@ -142,12 +142,15 @@ std::vector<std::string> LlmClient::listModels() {
     return models;
 }
 
-std::string LlmClient::chat(const std::vector<pe::ChatMessage>& messages, const nlohmann::json* schema) {
+pe::ChatReply LlmClient::chat(const std::vector<pe::ChatMessage>& messages, const pe::ChatOptions& options) {
+    const nlohmann::json* schema = options.schema;
     nlohmann::json msgs = nlohmann::json::array();
     for (const pe::ChatMessage& m : messages) msgs.push_back({{"role", m.role}, {"content", m.content}});
     for (;;) {
         const int mode = schema ? formatMode_ : 2;
-        nlohmann::json body = {{"model", model_}, {"messages", msgs}, {"temperature", 0.2}, {"max_tokens", 16384}};
+        nlohmann::json body = {{"model", model_}, {"messages", msgs}, {"temperature", 0.2}, {"max_tokens", maxTokens_}};
+        // The chat-template switch llama.cpp and Qwen-style templates understand; others ignore it.
+        if (!options.thinking) body["chat_template_kwargs"] = {{"enable_thinking", false}};
         if (mode == 0)
             body["response_format"] = {{"type", "json_schema"}, {"json_schema", {{"name", "topic"}, {"schema", *schema}}}};
         else if (mode == 1)
@@ -169,9 +172,19 @@ std::string LlmClient::chat(const std::vector<pe::ChatMessage>& messages, const 
         if (!j.is_object() || !j.contains("choices") || j["choices"].empty())
             throw std::runtime_error("unexpected reply from the server: " + response.substr(0, 300));
         const nlohmann::json& choice = j["choices"][0];
-        std::string content;
-        if (choice.contains("message") && choice["message"].contains("content") && choice["message"]["content"].is_string())
-            content = choice["message"]["content"].get<std::string>();
+        pe::ChatReply reply;
+        if (choice.contains("message")) {
+            const nlohmann::json& message = choice["message"];
+            if (message.contains("content") && message["content"].is_string())
+                reply.content = message["content"].get<std::string>();
+            // llama.cpp returns a reasoning model's thinking separately.
+            if (message.contains("reasoning_content") && message["reasoning_content"].is_string())
+                reply.reasoning = message["reasoning_content"].get<std::string>();
+        }
+        const std::string finish = choice.contains("finish_reason") && choice["finish_reason"].is_string()
+                                       ? choice["finish_reason"].get<std::string>()
+                                       : "";
+        reply.truncated = finish == "length";
         ++calls_;
         if (!transcripts_.empty()) {
             std::error_code ec;
@@ -181,12 +194,15 @@ std::string LlmClient::chat(const std::vector<pe::ChatMessage>& messages, const 
             nlohmann::json log = {
                 {"seconds", std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count()},
                 {"response_format", mode == 0 ? "json_schema" : mode == 1 ? "json_object" : "none"},
+                {"thinking", options.thinking},
+                {"max_tokens", maxTokens_},
                 {"messages", msgs},
-                {"reply", content},
-                {"finish_reason", choice.value("finish_reason", "")},
+                {"reasoning", reply.reasoning},
+                {"reply", reply.content},
+                {"finish_reason", finish},
                 {"usage", j.value("usage", nlohmann::json())}};
             std::ofstream(transcripts_ / name, std::ios::binary) << log.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
         }
-        return content;
+        return reply;
     }
 }

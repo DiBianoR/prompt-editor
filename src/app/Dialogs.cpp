@@ -323,6 +323,11 @@ void SettingsDialog::onCreate() {
     model_ = add(WC_COMBOBOXW, L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWN | CBS_AUTOHSCROLL, IDC_MODEL);
     SetWindowTextW(model_, widen(settings_.model).c_str());
     loadModels_ = add(WC_BUTTONW, L"Load models", WS_TABSTOP | BS_PUSHBUTTON, IDC_LOAD_MODELS);
+    contextLabel_ = add(WC_STATICW, L"Context window", SS_LEFT);
+    context_ = add(WC_EDITW, std::to_wstring(settings_.contextTokens).c_str(), WS_TABSTOP | ES_NUMBER | ES_AUTOHSCROLL,
+                   0, WS_EX_CLIENTEDGE);
+    contextInfo_ = add(WC_STATICW,
+                       L"tokens. Each reply, thinking included, may use up to 40% of it.", SS_LEFT | SS_NOPREFIX);
 
     promptLabel_ = add(WC_STATICW, L"Prompt", SS_LEFT);
     promptPick_ = add(WC_COMBOBOXW, L"", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST, IDC_PROMPT_PICK);
@@ -357,6 +362,10 @@ void SettingsDialog::onLayout(int width, int height) {
     place(modelLabel_, m, y + scale(4), labelW, rowH);
     place(model_, m + labelW, y, fieldW - btnW - gap, scale(300));
     place(loadModels_, width - m - btnW, y, btnW, rowH);
+    y += rowH + gap;
+    place(contextLabel_, m, y + scale(4), labelW, rowH);
+    place(context_, m + labelW, y, scale(110), rowH);
+    place(contextInfo_, m + labelW + scale(118), y + scale(4), fieldW - scale(118), rowH);
     y += rowH + gap * 3;
     place(promptLabel_, m, y + scale(4), labelW, rowH);
     place(promptPick_, m + labelW, y, fieldW - btnW - gap, scale(300));
@@ -458,6 +467,11 @@ void SettingsDialog::collect() {
     settings_.baseUrl = trimmed(narrow(textOf(url_)));
     settings_.apiKey = trimmed(narrow(textOf(key_)));
     settings_.model = trimmed(narrow(textOf(model_)));
+    try {
+        settings_.contextTokens = std::clamp(std::stoi(textOf(context_)), 8192, 10'000'000);
+    } catch (...) {
+        // left empty or unreadable: keep the previous value
+    }
     settings_.promptOverrides.clear();
     for (const pe::PromptInfo& p : pe::builtInPrompts())
         if (edited_[p.id] != p.text) settings_.promptOverrides[p.id] = edited_[p.id];

@@ -1255,6 +1255,7 @@ struct RunProgress {
     bool replaceMode = false;  // rebuilding one topic, keeping the rest
     std::vector<pe::TopicRequest> topics;
     nlohmann::json completed = nlohmann::json::array();  // [{"name", "index"}]
+    nlohmann::json failed = nlohmann::json::array();     // [{"name", "reason"}]: retried on resume
 
     std::filesystem::path file() const { return folder / L"progress.json"; }
 
@@ -1275,7 +1276,7 @@ struct RunProgress {
     bool save() const {
         nlohmann::json j = {{"version", 1}, {"document", document}, {"state", state},
                             {"replaceMode", replaceMode}, {"topics", nlohmann::json::array()},
-                            {"completed", completed}};
+                            {"completed", completed}, {"failed", failed}};
         for (const pe::TopicRequest& t : topics) j["topics"].push_back({{"name", t.name}, {"hint", t.hint}});
         std::error_code ec;
         std::filesystem::create_directories(folder, ec);
@@ -1295,6 +1296,7 @@ struct RunProgress {
         if (auto t = j.find("topics"); t != j.end() && t->is_array())
             for (const auto& x : *t) out.topics.push_back({x.value("name", ""), x.value("hint", "")});
         if (auto c = j.find("completed"); c != j.end() && c->is_array()) out.completed = *c;
+        if (auto f = j.find("failed"); f != j.end() && f->is_array()) out.failed = *f;
         return true;
     }
 };
@@ -1341,6 +1343,8 @@ struct MainWindow::JobResult {
     std::string error;
     bool cancelled = false;
     int failedTopics = 0;
+    std::vector<std::string> failedNames;
+    std::vector<std::string> warnings;  // "topic: what happened"
 };
 
 void MainWindow::openSettings() {
@@ -1451,6 +1455,7 @@ void MainWindow::startJob(Job job) {
         progress.topics = job.topics;
     }
     progress.state = "running";
+    progress.failed = nlohmann::json::array();  // a resumed run retries every topic that failed before
     if (job.kind == Job::Build && !progress.save()) {
         showError(hwnd_, L"Could not write the run's progress file in " + result->folder.wstring());
         return;
@@ -1459,6 +1464,7 @@ void MainWindow::startJob(Job job) {
 
     client_ = std::make_shared<LlmClient>(settings_.baseUrl, settings_.model, settings_.apiKey);
     client_->setTranscriptFolder(result->folder / L"calls");
+    client_->setMaxTokens(settings_.replyTokens());
     cancel_ = false;
     jobRunning_ = true;
     SetWindowTextW(logEdit_, L"");
@@ -1514,7 +1520,7 @@ void MainWindow::startJob(Job job) {
                 const auto& topics = result->job.topics;
                 const size_t total = progress.topics.size();
                 for (size_t i = 0; i < topics.size(); ++i) {
-                    const size_t number = progress.completed.size() + 1;
+                    const size_t number = total - topics.size() + i + 1;  // counts failed topics too
                     log("[" + std::to_string(number) + "/" + std::to_string(total) + "] " + topics[i].name);
                     // Colors follow the topic's place in the list. When topics are added to an
                     // index, a topic already there keeps its place, and new ones continue after it.
@@ -1535,20 +1541,26 @@ void MainWindow::startJob(Job job) {
                         log("  done: " + std::to_string(ranges) + " ranges, " +
                             std::to_string(out.topic.subtopics.size()) + " subtopics" +
                             (lost ? ", " + std::to_string(lost) + " lost (listed under the topics)" : ""));
+                        for (const std::string& w : out.warnings) result->warnings.push_back(topics[i].name + ": " + w);
                         pe::Topic topic = pe::toIndexTopic(out.topic, prev, used, palette);
                         topic.analysis =
                             (result->folder / std::filesystem::u8path(out.analysisFile)).make_preferred().u8string();
                         // Saved right away, with the text it refers to, so it survives anything that follows.
                         const pe::Index chunk = pe::assembleIndex(docName, snapshot, {topic});
-                        progress.completed.push_back(
-                            {{"name", topics[i].name}, {"index", nlohmann::json::parse(pe::serializeIndex(chunk))}});
+                        progress.completed.push_back({{"name", topics[i].name},
+                                                      {"warnings", out.warnings},
+                                                      {"index", nlohmann::json::parse(pe::serializeIndex(chunk))}});
                         progress.save();
                     } catch (const pe::Cancelled&) {
                         throw;
                     } catch (const std::exception& e) {
-                        // The index keeps what it already had for this topic.
+                        // Recorded and skipped: the run goes on, the index keeps what it had for this
+                        // topic, and the next Build index offers to retry it.
                         ++result->failedTopics;
-                        log(std::string("  FAILED: ") + e.what());
+                        result->failedNames.push_back(topics[i].name);
+                        log(std::string("  FAILED, moving on: ") + e.what());
+                        progress.failed.push_back({{"name", topics[i].name}, {"reason", e.what()}});
+                        progress.save();
                     }
                 }
             }
@@ -1630,11 +1642,23 @@ void MainWindow::onJobDone(JobResult* raw) {
                   L" model calls" +
                   (result->failedTopics ? L", " + std::to_wstring(result->failedTopics) + L" topics failed" : L"") +
                   L".");
+    } else if (!result->cancelled && result->error.empty()) {
+        // The run went through every topic, but some failed.
+        SetWindowTextW(logTitle_, L"Indexing finished, some topics failed");
+        std::wstring names;
+        for (const std::string& n : result->failedNames) names += (names.empty() ? L"" : L", ") + widen(n);
+        appendLog(std::to_wstring(done) + L" of " + std::to_wstring(total) + L" topics are finished and in the index. " +
+                  std::to_wstring(total - done) + L" failed: " + names +
+                  L". Build index (Ctrl+R) offers to retry them; the reasons are in progress.json.");
     } else {
         SetWindowTextW(logTitle_, L"Indexing stopped early");
         appendLog(std::to_wstring(done) + L" of " + std::to_wstring(total) + L" topics are finished" +
-                  (done ? L" and in the index" : L"") + L". Rebuild index (Ctrl+R) offers to resume the other " +
+                  (done ? L" and in the index" : L"") + L". Build index (Ctrl+R) offers to resume the other " +
                   std::to_wstring(total - done) + L".");
+    }
+    if (!result->warnings.empty()) {
+        appendLog(L"Warnings (worth a look):");
+        for (const std::string& w : result->warnings) appendLog(L"  " + widen(w));
     }
     appendLog(transcripts);
 }
@@ -1715,6 +1739,7 @@ void MainWindow::appendLog(const std::wstring& line) {
     const int len = GetWindowTextLengthW(logEdit_);
     SendMessageW(logEdit_, EM_SETSEL, len, len);
     SendMessageW(logEdit_, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(text.c_str()));
+    SendMessageW(logEdit_, EM_SCROLLCARET, 0, 0);  // keep the newest line in view
     if (jobRunning_ && !line.empty() && line[0] != L' ') SetWindowTextW(logTitle_, line.c_str());
 }
 

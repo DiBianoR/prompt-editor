@@ -93,11 +93,22 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": {"message": "response_format json_schema is not supported"}})
             return
         STATE["calls"] += 1
+        STATE["last_request"] = body
         time.sleep(ARGS.delay)
         content = reply_for(body["messages"])
-        self.send_json(200, {"choices": [{"index": 0, "finish_reason": "stop",
-                                          "message": {"role": "assistant", "content": content}}],
-                             "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+        finish = "stop"
+        # --cut-off: a conversion with thinking on runs out of tokens, as Qwen did on
+        # long topics; with thinking off it fits. A topic whose name contains "Cutoff"
+        # runs out either way.
+        thinking = (body.get("chat_template_kwargs") or {}).get("enable_thinking", True)
+        if ARGS.cut_off and fmt and "could not be matched" not in body["messages"][-1]["content"]:
+            if thinking or "Cutoff" in topic_of(body["messages"]):
+                content, finish = content[:len(content) // 2], "length"
+        self.send_json(200, {"choices": [{"index": 0, "finish_reason": finish,
+                                          "message": {"role": "assistant", "content": content,
+                                                      "reasoning_content": "fake thinking" if thinking else ""}}],
+                             "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                                       "max_tokens_seen": body.get("max_tokens")}})
 
 
 if __name__ == "__main__":
@@ -107,6 +118,7 @@ if __name__ == "__main__":
     p.add_argument("--delay", type=float, default=0)
     p.add_argument("--reject-schema", action="store_true")
     p.add_argument("--unfixable", action="store_true", help="never fix the bad quote")
+    p.add_argument("--cut-off", action="store_true", help="cut off conversions while thinking is on")
     ARGS = p.parse_args()
     print(f"fake LLM on http://127.0.0.1:{ARGS.port}/v1", flush=True)
     ThreadingHTTPServer(("127.0.0.1", ARGS.port), Handler).serve_forever()

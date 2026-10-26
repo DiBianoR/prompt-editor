@@ -25,12 +25,22 @@ struct ChatMessage {
     std::string content;
 };
 
+struct ChatOptions {
+    const nlohmann::json* schema = nullptr;  // hold the reply to this JSON schema, if the server can
+    bool thinking = true;                    // false asks a reasoning model to answer without thinking
+};
+
+struct ChatReply {
+    std::string content;
+    std::string reasoning;   // the model's thinking, when the server returns it separately
+    bool truncated = false;  // the reply stopped at the token limit
+};
+
 class ChatClient {
 public:
     virtual ~ChatClient() = default;
-    // `schema`, when given, asks the server to hold the reply to that JSON schema
-    // if it can. Throws on transport errors and on cancellation.
-    virtual std::string chat(const std::vector<ChatMessage>& messages, const nlohmann::json* schema) = 0;
+    // Throws on transport errors and on cancellation.
+    virtual ChatReply chat(const std::vector<ChatMessage>& messages, const ChatOptions& options) = 0;
 };
 
 class Cancelled : public std::runtime_error {
@@ -76,8 +86,15 @@ struct TopicSpans {
 
 struct TopicOutcome {
     TopicSpans topic;
-    std::string analysisFile;  // name passed to hooks.save for the step 1 findings
+    std::string analysisFile;           // name passed to hooks.save for the step 1 findings
+    std::vector<std::string> warnings;  // e.g. converted with thinking off after a cut-off reply
 };
+
+// Strings longer than legitimate quotes ever get. Reaching one marks the value
+// as a runaway (the model copying on and on) rather than a real quote; the
+// schema stops generation at these lengths so a runaway cannot eat the budget.
+constexpr size_t kMaxQuoteChars = 2000;
+constexpr size_t kMaxAnchorChars = 400;  // "from" and "to": asked for 4-12 words
 
 struct PipelineHooks {
     std::function<void(const std::string&)> log;
@@ -86,7 +103,9 @@ struct PipelineHooks {
 };
 
 std::string stripThinking(const std::string& text);
-// The first balanced JSON object in a reply; throws std::runtime_error.
+// The JSON object a reply consists of: the object opened by its first "{",
+// which must close and parse. Never a fragment from inside it. Throws
+// std::runtime_error otherwise.
 nlohmann::json extractJsonObject(const std::string& text);
 std::vector<TopicRequest> parseTopicLines(const std::string& text);
 

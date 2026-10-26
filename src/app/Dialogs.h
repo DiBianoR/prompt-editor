@@ -64,6 +64,7 @@ private:
     std::map<std::string, std::string> edited_;  // prompt id -> text being edited
     int shownPrompt_ = -1;
     HWND urlLabel_{}, url_{}, keyLabel_{}, key_{}, modelLabel_{}, model_{}, loadModels_{};
+    HWND contextLabel_{}, context_{}, contextInfo_{};
     HWND promptLabel_{}, promptPick_{}, reset_{}, placeholders_{}, promptEdit_{}, ok_{}, cancel_{};
 };
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 
@@ -13,7 +14,11 @@ struct AppSettings {
     std::string model;
     std::string apiKey;
     int repairs = 2;
+    int contextTokens = 262144;  // the model's context window
     pe::PromptSet promptOverrides;
+
+    // Each reply, thinking included, may use up to 40% of the context window.
+    int replyTokens() const { return std::max(4096, contextTokens / 5 * 2); }
 
     pe::PromptSet prompts() const;  // defaults with overrides applied
     bool serverConfigured() const { return !baseUrl.empty() && !model.empty(); }

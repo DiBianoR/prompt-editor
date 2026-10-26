@@ -81,6 +81,7 @@ AppSettings AppSettings::load() {
     s.model = j.value("model", "");
     s.apiKey = unprotect(j.value("apiKeyProtected", ""));
     s.repairs = j.value("repairs", 2);
+    s.contextTokens = std::max(8192, j.value("contextTokens", 262144));
     if (auto it = j.find("prompts"); it != j.end() && it->is_object())
         for (const auto& [id, text] : it->items())
             if (text.is_string()) s.promptOverrides[id] = text.get<std::string>();
@@ -93,6 +94,7 @@ bool AppSettings::save() const {
     j["model"] = model;
     j["apiKeyProtected"] = protect(apiKey);
     j["repairs"] = repairs;
+    j["contextTokens"] = contextTokens;
     j["prompts"] = nlohmann::json::object();
     const pe::PromptSet defaults = pe::defaultPromptSet();
     for (const auto& [id, text] : promptOverrides) {

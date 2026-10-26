@@ -5,6 +5,7 @@
 #include <regex>
 
 #include "Anchor.h"
+#include "Text.h"
 
 namespace pe {
 
@@ -67,15 +68,43 @@ struct Failure {
     std::string reason;
 };
 
+// A runaway is a quote that never stopped: often a verbatim copy of the rest of
+// the document, which would otherwise match and become one enormous range.
+// The caps are far above any real quote, so reaching one is unambiguous.
+std::string runawayIn(const nlohmann::json& item) {
+    if (!item.is_object()) return {};
+    const std::pair<const char*, size_t> fields[] = {
+        {"quote", kMaxQuoteChars}, {"from", kMaxAnchorChars}, {"to", kMaxAnchorChars}};
+    for (const auto& [key, cap] : fields) {
+        auto it = item.find(key);
+        if (it != item.end() && it->is_string() && countChars(it->get<std::string>()) >= cap)
+            return std::string("runaway text in \"") + key + "\" (" + std::to_string(countChars(it->get<std::string>())) +
+                   " characters; a real one is far shorter)";
+    }
+    return {};
+}
+
+// Resolves one range, refusing runaways.
+Span resolveChecked(const SourceDocument& doc, const nlohmann::json& item) {
+    if (const std::string runaway = runawayIn(item); !runaway.empty()) throw ResolveError(runaway);
+    return resolveRange(doc, item);
+}
+
 void resolveNode(const SourceDocument& doc, const nlohmann::json& obj, int node, TopicSpans& into,
                  std::vector<Failure>& failures) {
     auto it = obj.find("ranges");
     if (it == obj.end() || !it->is_array()) return;
     for (const nlohmann::json& item : *it) {
         try {
-            into.spans.push_back(resolveRange(doc, item));
+            into.spans.push_back(resolveChecked(doc, item));
         } catch (const ResolveError& e) {
-            failures.push_back({"r" + std::to_string(failures.size() + 1), node, item, e.what()});
+            // The repair prompt shows the item; a runaway is cut short so it does not flood it.
+            nlohmann::json shown = item;
+            if (!runawayIn(item).empty())
+                for (const char* key : {"quote", "from", "to"})
+                    if (shown.contains(key) && shown[key].is_string())
+                        shown[key] = shown[key].get<std::string>().substr(0, 120) + "...";
+            failures.push_back({"r" + std::to_string(failures.size() + 1), node, shown, e.what()});
         }
     }
 }
@@ -163,7 +192,7 @@ void applyFixes(const SourceDocument& doc, const nlohmann::json& reply, TopicSpa
         nlohmann::json item = fix;
         if (!item.contains("tier") && f->item.is_object() && f->item.contains("tier")) item["tier"] = f->item["tier"];
         try {
-            nodeOf(topic, f->node).spans.push_back(resolveRange(doc, item));
+            nodeOf(topic, f->node).spans.push_back(resolveChecked(doc, item));
             failures.erase(f);
         } catch (const ResolveError& e) {
             f->item = item;
@@ -261,16 +290,22 @@ std::string render(const std::string& tmpl, const std::map<std::string, std::str
     return out;
 }
 
+// String fields that quote the document, capped at the runaway lengths so a
+// server that enforces the schema stops a runaway there.
+nlohmann::json quoteFields() {
+    return {{"quote", {{"type", "string"}, {"maxLength", kMaxQuoteChars}}},
+            {"from", {{"type", "string"}, {"maxLength", kMaxAnchorChars}}},
+            {"to", {{"type", "string"}, {"maxLength", kMaxAnchorChars}}}};
+}
+
 const nlohmann::json& topicSchema() {
     static const nlohmann::json schema = [] {
         nlohmann::json range = {{"type", "object"},
                                 {"properties",
                                  {{"lines", {{"type", "string"}}},
-                                  {"quote", {{"type", "string"}}},
-                                  {"from", {{"type", "string"}}},
-                                  {"to", {{"type", "string"}}},
                                   {"line", {{"type", "integer"}}},
                                   {"tier", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}}};
+        range["properties"].update(quoteFields());
         nlohmann::json nodeProps = {{"name", {{"type", "string"}}},
                                     {"note", {{"type", "string"}}},
                                     {"ranges", {{"type", "array"}, {"items", range}}}};
@@ -283,23 +318,19 @@ const nlohmann::json& topicSchema() {
 }
 
 const nlohmann::json& repairSchema() {
-    static const nlohmann::json schema = {
-        {"type", "object"},
-        {"properties",
-         {{"fixes",
-           {{"type", "array"},
-            {"items",
-             {{"type", "object"},
-              {"properties",
-               {{"id", {{"type", "string"}}},
-                {"lines", {{"type", "string"}}},
-                {"quote", {{"type", "string"}}},
-                {"from", {{"type", "string"}}},
-                {"to", {{"type", "string"}}},
-                {"line", {{"type", "integer"}}},
-                {"tier", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}},
-              {"required", {"id"}}}}}}}},
-        {"required", {"fixes"}}};
+    static const nlohmann::json schema = [] {
+        nlohmann::json fix = {{"type", "object"},
+                              {"properties",
+                               {{"id", {{"type", "string"}}},
+                                {"lines", {{"type", "string"}}},
+                                {"line", {{"type", "integer"}}},
+                                {"tier", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}},
+                              {"required", {"id"}}};
+        fix["properties"].update(quoteFields());
+        return nlohmann::json{{"type", "object"},
+                              {"properties", {{"fixes", {{"type", "array"}, {"items", fix}}}}},
+                              {"required", {"fixes"}}};
+    }();
     return schema;
 }
 
@@ -314,29 +345,30 @@ std::string stripThinking(const std::string& text) {
 }
 
 nlohmann::json extractJsonObject(const std::string& text) {
-    size_t start = text.find('{');
-    while (start != std::string::npos) {
-        int depth = 0;
-        bool inString = false, escaped = false;
-        for (size_t i = start; i < text.size(); ++i) {
-            const char c = text[i];
-            if (inString) {
-                if (escaped) escaped = false;
-                else if (c == '\\') escaped = true;
-                else if (c == '"') inString = false;
-            } else if (c == '"') {
-                inString = true;
-            } else if (c == '{') {
-                ++depth;
-            } else if (c == '}' && --depth == 0) {
-                nlohmann::json j = nlohmann::json::parse(text.begin() + start, text.begin() + i + 1, nullptr, false);
-                if (!j.is_discarded() && j.is_object()) return j;
-                break;
-            }
+    // Only the object the reply opens with counts. Falling back to a later "{"
+    // would pick a fragment from inside a cut-off reply (one range, or one
+    // subtopic) and pass it off as the whole answer.
+    const size_t start = text.find('{');
+    if (start == std::string::npos) throw std::runtime_error("no JSON object in the reply");
+    int depth = 0;
+    bool inString = false, escaped = false;
+    for (size_t i = start; i < text.size(); ++i) {
+        const char c = text[i];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') inString = false;
+        } else if (c == '"') {
+            inString = true;
+        } else if (c == '{') {
+            ++depth;
+        } else if (c == '}' && --depth == 0) {
+            nlohmann::json j = nlohmann::json::parse(text.begin() + start, text.begin() + i + 1, nullptr, false);
+            if (j.is_discarded() || !j.is_object()) throw std::runtime_error("the reply's JSON object does not parse");
+            return j;
         }
-        start = text.find('{', start + 1);
     }
-    throw std::runtime_error("no valid JSON object in the reply");
+    throw std::runtime_error("the reply ends before its JSON object is complete");
 }
 
 std::vector<TopicRequest> parseTopicLines(const std::string& text) {
@@ -377,7 +409,9 @@ std::vector<TopicRequest> discoverTopics(ChatClient& llm, const SourceDocument& 
     const std::vector<ChatMessage> messages = {
         {"system", trim(prompt(prompts, "system"))},
         {"user", render(prompt(prompts, "discover"), {{"DOCUMENT", doc.numbered()}, {"EXISTING", existingText}})}};
-    const std::string reply = stripThinking(llm.chat(messages, nullptr));
+    const ChatReply answer = llm.chat(messages, {});
+    if (answer.truncated) say(hooks, "  warning: the reply was cut off at the token limit; the list may be incomplete");
+    const std::string reply = stripThinking(answer.content);
     if (hooks.save) hooks.save("topics.txt", reply);
     auto topics = parseTopicLines(reply);
     say(hooks, "Proposed " + std::to_string(topics.size()) + " topics.");
@@ -395,20 +429,37 @@ TopicOutcome indexTopic(ChatClient& llm, const SourceDocument& doc, const TopicR
                          {"TOPIC_HINT", request.hint.empty() ? "" : "(" + request.hint + ")\n"}})}};
     checkCancel(hooks);
     say(hooks, "  finding passages...");
-    const std::string findings = stripThinking(llm.chat(messages, nullptr));
+    std::vector<std::string> warnings;
+    const ChatReply found = llm.chat(messages, {});
+    if (found.truncated) {
+        warnings.push_back("the findings were cut off at the token limit, so passages may be missing");
+        say(hooks, "  warning: " + warnings.back());
+    }
+    const std::string findings = stripThinking(found.content);
     if (hooks.save) hooks.save(prefix + "1-findings.md", findings);
 
     messages.push_back({"assistant", findings});
     messages.push_back({"user", render(prompt(prompts, "format_topic"), {{"TOPIC", request.name}})});
 
-    // Step 2: the whole topic as JSON. Retried only if the reply is not JSON at all.
+    // Step 2: the whole topic as JSON. A reply cut off at the token limit is
+    // retried once with thinking off, which leaves the whole budget for the
+    // answer; a reply that is complete but not valid JSON is sent back to fix.
     nlohmann::json obj;
-    bool parsed = false;
-    for (int attempt = 0; attempt <= repairs && !parsed; ++attempt) {
+    bool parsed = false, thinking = true;
+    int attempts = repairs + 1;
+    for (int attempt = 0; attempt < attempts && !parsed; ++attempt) {
         checkCancel(hooks);
-        say(hooks, "  converting to ranges...");
-        const std::string reply = stripThinking(llm.chat(messages, &topicSchema()));
+        say(hooks, thinking ? "  converting to ranges..." : "  converting to ranges, thinking off...");
+        const ChatReply answer = llm.chat(messages, {&topicSchema(), thinking});
+        const std::string reply = stripThinking(answer.content);
         if (hooks.save) hooks.save(prefix + "2-format-" + std::to_string(attempt) + ".json", reply);
+        if (answer.truncated) {
+            if (!thinking) throw std::runtime_error("the reply was cut off at the token limit, even with thinking off");
+            say(hooks, "  the reply was cut off at the token limit; trying again with thinking off");
+            thinking = false;
+            ++attempts;  // this retry does not use up a JSON fix
+            continue;    // same request again; the cut-off reply is not kept
+        }
         messages.push_back({"assistant", reply});
         try {
             obj = extractJsonObject(reply);
@@ -420,6 +471,10 @@ TopicOutcome indexTopic(ChatClient& llm, const SourceDocument& doc, const TopicR
         }
     }
     if (!parsed) throw std::runtime_error("no usable JSON for topic \"" + request.name + "\"");
+    if (!thinking) {
+        warnings.push_back("converted with thinking off, after the first reply was cut off at the token limit");
+        say(hooks, "  warning: " + warnings.back());
+    }
 
     std::vector<Failure> failures;
     TopicSpans topic = resolveTopic(doc, obj, failures);
@@ -431,14 +486,20 @@ TopicOutcome indexTopic(ChatClient& llm, const SourceDocument& doc, const TopicR
         checkCancel(hooks);
         say(hooks, "  asking the model to fix " + std::to_string(failures.size()) + " unmatched ranges...");
         messages.push_back({"user", render(prompt(prompts, "repair"), {{"FAILURES", formatFailures(doc, failures)}})});
-        const std::string reply = stripThinking(llm.chat(messages, &repairSchema()));
+        const ChatReply answer = llm.chat(messages, {&repairSchema(), thinking});
+        const std::string reply = stripThinking(answer.content);
         if (hooks.save) hooks.save(prefix + "3-repair-" + std::to_string(round) + ".json", reply);
         messages.push_back({"assistant", reply});
         const size_t before = failures.size();
-        try {
-            applyFixes(doc, extractJsonObject(reply), topic, failures, hooks);
-        } catch (const std::exception& e) {
-            say(hooks, std::string("  repair reply was not valid JSON (") + e.what() + ")");
+        if (answer.truncated) {
+            say(hooks, "  the repair reply was cut off at the token limit");
+            thinking = false;  // the next round, if any, leaves the whole budget for the answer
+        } else {
+            try {
+                applyFixes(doc, extractJsonObject(reply), topic, failures, hooks);
+            } catch (const std::exception& e) {
+                say(hooks, std::string("  repair reply was not valid JSON (") + e.what() + ")");
+            }
         }
         say(hooks, "  fixed " + std::to_string(before - failures.size()) + ", " + std::to_string(failures.size()) +
                        " still unmatched");
@@ -453,7 +514,7 @@ TopicOutcome indexTopic(ChatClient& llm, const SourceDocument& doc, const TopicR
 
     topic.name = request.name;  // the topic list's name wins over the model's rewording
     cleanTopic(doc, topic);
-    return {std::move(topic), prefix + "1-findings.md"};
+    return {std::move(topic), prefix + "1-findings.md", std::move(warnings)};
 }
 
 // ---- Assembly ----

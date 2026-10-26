@@ -18,10 +18,12 @@ public:
     ~LlmClient() override;
 
     std::vector<std::string> listModels();
-    std::string chat(const std::vector<pe::ChatMessage>& messages, const nlohmann::json* schema) override;
+    pe::ChatReply chat(const std::vector<pe::ChatMessage>& messages, const pe::ChatOptions& options) override;
     void abort();
 
     void setTimeoutSeconds(int seconds) { timeoutSeconds_ = seconds; }
+    // Upper limit on each reply, thinking included.
+    void setMaxTokens(int tokens) { maxTokens_ = tokens; }
     // Each call is written there as NNN.json (request, reply, timing).
     void setTranscriptFolder(std::filesystem::path folder) { transcripts_ = std::move(folder); }
     int calls() const { return calls_; }
@@ -33,6 +35,7 @@ private:
     std::string model_;
     std::string apiKey_;
     int timeoutSeconds_ = 1800;
+    int maxTokens_ = 16384;
     std::filesystem::path transcripts_;
     int calls_ = 0;
     int formatMode_ = 0;  // 0 json_schema, 1 json_object, 2 none

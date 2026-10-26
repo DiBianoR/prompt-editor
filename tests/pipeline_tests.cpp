@@ -159,18 +159,27 @@ void testPrompts() {
     CHECK(render("a {{X}} b {{X}}", {{"X", "{{X}}y"}}) == "a {{X}}y b {{X}}y");
 }
 
+// Replies from a script. A scripted reply starting with "<<CUT>>" comes back as
+// cut off at the token limit.
 class FakeLLM : public ChatClient {
 public:
     explicit FakeLLM(std::deque<std::string> replies) : replies_(std::move(replies)) {}
-    std::string chat(const std::vector<ChatMessage>& messages, const json* schema) override {
+    ChatReply chat(const std::vector<ChatMessage>& messages, const ChatOptions& options) override {
         sent.push_back(messages);
-        schemas.push_back(schema != nullptr);
-        std::string r = replies_.front();
+        schemas.push_back(options.schema != nullptr);
+        thinking.push_back(options.thinking);
+        ChatReply r;
+        r.content = replies_.front();
         replies_.pop_front();
+        if (r.content.rfind("<<CUT>>", 0) == 0) {
+            r.truncated = true;
+            r.content.erase(0, 7);
+        }
         return r;
     }
     std::vector<std::vector<ChatMessage>> sent;
     std::vector<bool> schemas;
+    std::vector<bool> thinking;
 
 private:
     std::deque<std::string> replies_;
@@ -244,6 +253,63 @@ void testUnfixableIsKeptAsLost() {
     CHECK(parseIndex(serializeIndex(index)).topics[0].ranges[1].status == AnchorStatus::Orphaned);
 }
 
+void testFragmentIsRejected() {
+    // A reply cut off inside its object must not yield an inner object as the answer.
+    const std::string cut = R"({"name": "X", "ranges": [], "subtopics": [{"name": "A", "ranges": [{"lines": "4"}, {"lines": "6"}]}, {"name": "B", "ranges": [{"lines": "5", "ti)";
+    bool threw = false;
+    try {
+        extractJsonObject(cut);
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+void testCutOffRetriesWithoutThinking() {
+    const json good = {{"name", "X"}, {"ranges", json::array({{{"lines", "4"}, {"tier", 1}}})}, {"subtopics", json::array()}};
+    FakeLLM llm({"findings", R"(<<CUT>>{"name": "X", "ranges": [{"lines": "4"}, {"li)", good.dump()});
+    TopicOutcome out = indexTopic(llm, doc(), {"X", ""}, defaultPromptSet(), 2, {});
+    CHECK(llm.sent.size() == 3);
+    CHECK(llm.thinking[0] && llm.thinking[1] && !llm.thinking[2]);  // only the retry turns thinking off
+    CHECK(llm.sent[2].size() == llm.sent[1].size());                  // same request; the cut-off reply is dropped
+    CHECK(out.topic.spans.size() == 1);
+    CHECK(out.warnings.size() == 1 && out.warnings[0].find("thinking off") != std::string::npos);
+}
+
+void testCutOffTwiceFails() {
+    FakeLLM llm({"findings", R"(<<CUT>>{"name": "X", "ran)", R"(<<CUT>>{"name": "X", "ran)"});
+    bool threw = false;
+    try {
+        indexTopic(llm, doc(), {"X", ""}, defaultPromptSet(), 2, {});
+    } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find("cut off") != std::string::npos;
+    }
+    CHECK(threw);
+    CHECK(llm.sent.size() == 3);
+}
+
+void testRunawayIsRepaired() {
+    // A "to" that runs on as a copy of the document would match verbatim and
+    // become one huge range; it must be caught and sent back as one item.
+    std::string runaway = "Always read a file before editing it.";
+    while (runaway.size() < kMaxAnchorChars) runaway += " and so on";
+    const json bad = {{"name", "X"},
+                      {"ranges", json::array({{{"lines", "6"}, {"tier", 2}},
+                                              {{"from", "Always read a file"}, {"to", runaway}, {"tier", 3}}})},
+                      {"subtopics", json::array()}};
+    FakeLLM llm({"findings", bad.dump(), R"({"fixes": [{"id": "r1", "lines": "4"}]})"});
+    TopicOutcome out = indexTopic(llm, doc(), {"X", ""}, defaultPromptSet(), 2, {});
+    CHECK(llm.sent.size() == 3);
+    const std::string& repair = llm.sent[2].back().content;
+    CHECK(repair.find("runaway") != std::string::npos);
+    CHECK(repair.size() < 4000);  // the runaway is shown cut short, not in full
+    CHECK(out.topic.spans.size() == 2 && out.topic.lost.empty());
+    CHECK(out.topic.spans[0].tier == 3 || out.topic.spans[1].tier == 3);  // the fix kept the tier it had
+    // The schema caps the same fields, so the server can stop a runaway early.
+    CHECK(topicSchema()["properties"]["ranges"]["items"]["properties"]["to"]["maxLength"] == kMaxAnchorChars);
+    CHECK(repairSchema()["properties"]["fixes"]["items"]["properties"]["quote"]["maxLength"] == kMaxQuoteChars);
+}
+
 void testCancel() {
     FakeLLM llm({"findings"});
     PipelineHooks hooks;
@@ -296,6 +362,10 @@ int main() {
         {"prompts", testPrompts},
         {"find, format, repair", testFindFormatRepair},
         {"unfixable is kept as lost", testUnfixableIsKeptAsLost},
+        {"fragment is rejected", testFragmentIsRejected},
+        {"cut-off retries without thinking", testCutOffRetriesWithoutThinking},
+        {"cut-off twice fails", testCutOffTwiceFails},
+        {"runaway is repaired", testRunawayIsRepaired},
         {"cancel", testCancel},
         {"assemble", testAssemble},
     };
