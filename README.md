@@ -20,7 +20,9 @@ changes.
   (Ctrl+R) asks for the topic list (or has the model propose one, or propose
   additional topics for an existing index). **Rebuild full index** redoes every
   listed topic and drops the rest; **Build new topics only** builds just the
-  listed topics the index lacks and keeps everything else. The model then
+  listed topics the index lacks and keeps everything else. Either way the
+  topics end up in the list's order, so reordering the list and choosing
+  **Build new topics only** also just reorders the index. The model then
   indexes each topic in its own conversation: the model reports every passage
   on the topic, then converts its findings into ranges. Only ranges that do not
   match the document go back to it to fix, one by one; anything still unmatched

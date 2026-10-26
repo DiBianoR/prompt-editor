@@ -106,6 +106,7 @@ private:
         enum Kind { Build, Discover } kind = Build;
         std::vector<pe::TopicRequest> topics;  // the topics to index in this job
         bool replaceMode = false;               // rebuild these topics, keep the others
+        std::vector<std::string> order;         // replaceMode: put the topics in this order afterwards
         std::filesystem::path resumeFolder;     // continue this interrupted run
         std::wstring topicsText;                // Discover: the topic list to add proposals to
     };

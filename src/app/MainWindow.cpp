@@ -1312,12 +1312,32 @@ LRESULT CALLBACK MainWindow::overviewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
 // error, closing the app, a crash) can be resumed from it. Each finished topic
 // is stored as a one-topic index with the hash of the text the model saw, so it
 // can be anchored to whatever the document looks like when it is applied.
+static std::string lowerAscii(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+// Puts topics in the order of a topic list (names compared ignoring case);
+// topics the list leaves out keep their relative order after the listed ones.
+static void orderTopics(std::vector<pe::Topic>& topics, const std::vector<std::string>& order) {
+    if (order.empty()) return;
+    std::map<std::string, size_t> rank;
+    for (size_t i = 0; i < order.size(); ++i) rank.emplace(lowerAscii(order[i]), i);
+    auto rankOf = [&](const pe::Topic& t) {
+        auto it = rank.find(lowerAscii(t.name));
+        return it != rank.end() ? it->second : order.size();
+    };
+    std::stable_sort(topics.begin(), topics.end(),
+                     [&](const pe::Topic& a, const pe::Topic& b) { return rankOf(a) < rankOf(b); });
+}
+
 struct RunProgress {
     std::filesystem::path folder;
     std::string document;  // absolute path of the prompt, UTF-8
     std::string state;     // running, interrupted, done, abandoned
     bool replaceMode = false;  // rebuilding one topic, keeping the rest
     std::vector<pe::TopicRequest> topics;
+    std::vector<std::string> order;  // replaceMode: the topic list's order, applied to the index afterwards
     nlohmann::json completed = nlohmann::json::array();  // [{"name", "index"}]
     nlohmann::json failed = nlohmann::json::array();     // [{"name", "reason"}]: retried on resume
 
@@ -1342,6 +1362,7 @@ struct RunProgress {
                             {"replaceMode", replaceMode}, {"topics", nlohmann::json::array()},
                             {"completed", completed}, {"failed", failed}};
         for (const pe::TopicRequest& t : topics) j["topics"].push_back({{"name", t.name}, {"hint", t.hint}});
+        if (!order.empty()) j["order"] = order;
         std::error_code ec;
         std::filesystem::create_directories(folder, ec);
         return writeFileAtomic(file(), j.dump(1));
@@ -1359,6 +1380,9 @@ struct RunProgress {
         out.replaceMode = j.value("replaceMode", false);
         if (auto t = j.find("topics"); t != j.end() && t->is_array())
             for (const auto& x : *t) out.topics.push_back({x.value("name", ""), x.value("hint", "")});
+        if (auto o = j.find("order"); o != j.end() && o->is_array())
+            for (const auto& x : *o)
+                if (x.is_string()) out.order.push_back(x.get<std::string>());
         if (auto c = j.find("completed"); c != j.end() && c->is_array()) out.completed = *c;
         if (auto f = j.find("failed"); f != j.end() && f->is_array()) out.failed = *f;
         return true;
@@ -1463,18 +1487,33 @@ void MainWindow::rebuildIndexDialog(std::wstring topicsText) {
         job.topics = pe::parseTopicLines(narrow(dlg.text()));
         if (!job.topics.empty()) startJob(std::move(job));
     } else if (result == TopicsDialog::kBuildNew) {
-        // Only topics the index does not have yet; existing ones are left exactly as they are.
-        auto lower = [](std::string s) {
-            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            return s;
-        };
+        // Only topics the index does not have yet; existing ones keep their passages.
+        // Afterwards the index follows the list's order.
         std::set<std::string> have;
-        for (const pe::Topic& t : index_.topics) have.insert(lower(t.name));
+        for (const pe::Topic& t : index_.topics) have.insert(lowerAscii(t.name));
         Job job;
         job.replaceMode = true;
-        for (const pe::TopicRequest& t : pe::parseTopicLines(narrow(dlg.text())))
-            if (!have.count(lower(t.name))) job.topics.push_back(t);
+        for (const pe::TopicRequest& t : pe::parseTopicLines(narrow(dlg.text()))) {
+            job.order.push_back(t.name);
+            if (!have.count(lowerAscii(t.name))) job.topics.push_back(t);
+        }
         if (job.topics.empty()) {
+            std::vector<pe::Topic> topics = index_.topics;
+            orderTopics(topics, job.order);
+            if (!std::equal(topics.begin(), topics.end(), index_.topics.begin(), index_.topics.end(),
+                            [](const pe::Topic& a, const pe::Topic& b) { return a.name == b.name; })) {
+                hits_.clear();  // they point into the topics being moved
+                current_ = -1;
+                selected_ = {-1, -1};
+                index_.topics = std::move(topics);
+                writeIndexFile();
+                buildTree();
+                refresh();
+                MessageBoxW(hwnd_, L"Every topic in the list is already in the index, so nothing was built. The topics "
+                                   L"now follow the list's order.",
+                            kAppName, MB_OK | MB_ICONINFORMATION);
+                return;
+            }
             MessageBoxW(hwnd_, L"Every topic in the list is already in the index. Add new topics to the list, or "
                                L"use Rebuild full index to redo them.",
                         kAppName, MB_OK | MB_ICONINFORMATION);
@@ -1517,6 +1556,7 @@ void MainWindow::startJob(Job job) {
         progress.document = std::filesystem::absolute(docPath_).u8string();
         progress.replaceMode = job.replaceMode;
         progress.topics = job.topics;
+        progress.order = job.order;
     }
     progress.state = "running";
     progress.failed = nlohmann::json::array();  // a resumed run retries every topic that failed before
@@ -1757,6 +1797,7 @@ void MainWindow::applyRun(const RunProgress& progress) {
             if (it != topics.end()) *it = topic;
             else topics.push_back(topic);
         }
+        orderTopics(topics, progress.order);
     } else {
         for (const pe::TopicRequest& r : progress.topics) {
             if (auto it = done.find(r.name); it != done.end()) topics.push_back(it->second);
