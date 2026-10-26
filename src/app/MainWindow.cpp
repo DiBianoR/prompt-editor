@@ -1008,12 +1008,31 @@ void MainWindow::deleteSelectedTopic() {
     if (node.sub < 0 && !topic.subtopics.empty())
         what += L" and its " + std::to_wstring(topic.subtopics.size()) +
                 (topic.subtopics.size() == 1 ? L" subtopic" : L" subtopics");
-    const std::wstring question = L"Delete the " + what + L" (" + std::to_wstring(passages) +
-                                  (passages == 1 ? L" passage" : L" passages") +
-                                  L") from the index?\n\nThe document itself is not changed.";
+    // A topic's files from the run that built it (findings, conversions, repairs)
+    // sit in one folder, runs\<run>\<topic>; they go with the topic. The run's
+    // call logs are per call and stay. Only a folder of that shape is touched.
+    std::filesystem::path topicFolder;
+    if (node.sub < 0 && !topic.analysis.empty()) {
+        std::error_code ec;
+        const auto folder = std::filesystem::weakly_canonical(std::filesystem::u8path(topic.analysis), ec).parent_path();
+        const auto runs = std::filesystem::weakly_canonical(runsFolder(), ec);
+        if (!ec && folder.parent_path().parent_path() == runs && folder.filename() != L"calls" &&
+            std::filesystem::is_directory(folder, ec))
+            topicFolder = folder;
+    }
+    std::wstring question = L"Delete the " + what + L" (" + std::to_wstring(passages) +
+                            (passages == 1 ? L" passage" : L" passages") + L") from the index?";
+    if (!topicFolder.empty())
+        question += L"\n\nIts files from the run that built it are deleted too:\n" + topicFolder.wstring();
+    question += L"\n\nThe document itself is not changed.";
     if (MessageBoxW(hwnd_, question.c_str(), kAppName, MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK) return;
 
     const std::wstring name = widen(topic.name);
+    if (!topicFolder.empty()) {
+        std::error_code ec;
+        std::filesystem::remove_all(topicFolder, ec);
+        if (ec) appendLog(L"Could not delete " + topicFolder.wstring() + L": " + widen(ec.message()));
+    }
     hits_.clear();  // they point into the topic being removed
     current_ = -1;
     selected_ = {-1, -1};
