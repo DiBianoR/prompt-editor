@@ -997,6 +997,28 @@ void MainWindow::setCurrentTier(int tier) {
                             : L"Tier cleared");
 }
 
+// A topic's files from the run that built it (findings, conversions, repairs)
+// sit in one folder, runs\<run>\<topic>; they go with the topic. The run's call
+// logs are per call and stay. Only a folder of that shape is returned.
+static std::filesystem::path topicRunFolder(const pe::Topic& topic) {
+    if (topic.analysis.empty()) return {};
+    std::error_code ec;
+    const auto folder = std::filesystem::weakly_canonical(std::filesystem::u8path(topic.analysis), ec).parent_path();
+    const auto runs = std::filesystem::weakly_canonical(runsFolder(), ec);
+    if (!ec && folder.parent_path().parent_path() == runs && folder.filename() != L"calls" &&
+        std::filesystem::is_directory(folder, ec))
+        return folder;
+    return {};
+}
+
+void MainWindow::deleteTopicFolder(const pe::Topic& topic) {
+    const std::filesystem::path folder = topicRunFolder(topic);
+    if (folder.empty()) return;
+    std::error_code ec;
+    std::filesystem::remove_all(folder, ec);
+    if (ec) appendLog(L"Could not delete " + folder.wstring() + L": " + widen(ec.message()));
+}
+
 void MainWindow::deleteSelectedTopic() {
     if (!hasIndex_ || selected_.topic < 0 || jobRunning_) return;
     const NodeRef node = selected_;
@@ -1007,18 +1029,7 @@ void MainWindow::deleteSelectedTopic() {
     if (node.sub < 0 && !topic.subtopics.empty())
         what += L" and its " + std::to_wstring(topic.subtopics.size()) +
                 (topic.subtopics.size() == 1 ? L" subtopic" : L" subtopics");
-    // A topic's files from the run that built it (findings, conversions, repairs)
-    // sit in one folder, runs\<run>\<topic>; they go with the topic. The run's
-    // call logs are per call and stay. Only a folder of that shape is touched.
-    std::filesystem::path topicFolder;
-    if (node.sub < 0 && !topic.analysis.empty()) {
-        std::error_code ec;
-        const auto folder = std::filesystem::weakly_canonical(std::filesystem::u8path(topic.analysis), ec).parent_path();
-        const auto runs = std::filesystem::weakly_canonical(runsFolder(), ec);
-        if (!ec && folder.parent_path().parent_path() == runs && folder.filename() != L"calls" &&
-            std::filesystem::is_directory(folder, ec))
-            topicFolder = folder;
-    }
+    const std::filesystem::path topicFolder = node.sub < 0 ? topicRunFolder(topic) : std::filesystem::path{};
     std::wstring question = L"Delete the " + what + L" (" + std::to_wstring(passages) +
                             (passages == 1 ? L" passage" : L" passages") + L") from the index?";
     if (!topicFolder.empty())
@@ -1027,11 +1038,7 @@ void MainWindow::deleteSelectedTopic() {
     if (MessageBoxW(hwnd_, question.c_str(), kAppName, MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK) return;
 
     const std::wstring name = widen(topic.name);
-    if (!topicFolder.empty()) {
-        std::error_code ec;
-        std::filesystem::remove_all(topicFolder, ec);
-        if (ec) appendLog(L"Could not delete " + topicFolder.wstring() + L": " + widen(ec.message()));
-    }
+    if (node.sub < 0) deleteTopicFolder(topic);
     hits_.clear();  // they point into the topic being removed
     current_ = -1;
     selected_ = {-1, -1};
@@ -1487,31 +1494,62 @@ void MainWindow::rebuildIndexDialog(std::wstring topicsText) {
         job.topics = pe::parseTopicLines(narrow(dlg.text()));
         if (!job.topics.empty()) startJob(std::move(job));
     } else if (result == TopicsDialog::kBuildNew) {
-        // Only topics the index does not have yet; existing ones keep their passages.
-        // Afterwards the index follows the list's order.
-        std::set<std::string> have;
+        // The index ends up matching the list: topics it does not have yet are
+        // built, existing ones keep their passages, ones taken off the list are
+        // deleted (after asking), and the order follows the list.
+        const std::vector<pe::TopicRequest> listed = pe::parseTopicLines(narrow(dlg.text()));
+        if (listed.empty()) return;
+        std::set<std::string> have, wanted;
         for (const pe::Topic& t : index_.topics) have.insert(lowerAscii(t.name));
         Job job;
         job.replaceMode = true;
-        for (const pe::TopicRequest& t : pe::parseTopicLines(narrow(dlg.text()))) {
+        for (const pe::TopicRequest& t : listed) {
+            wanted.insert(lowerAscii(t.name));
             job.order.push_back(t.name);
             if (!have.count(lowerAscii(t.name))) job.topics.push_back(t);
         }
+        std::vector<pe::Topic> topics;
+        std::wstring removed;
+        size_t removedCount = 0;
+        for (const pe::Topic& t : index_.topics) {
+            if (wanted.count(lowerAscii(t.name))) {
+                topics.push_back(t);
+            } else {
+                removed += L"\n    " + widen(t.name);
+                ++removedCount;
+            }
+        }
+        if (removedCount) {
+            const std::wstring question =
+                std::to_wstring(removedCount) + (removedCount == 1 ? L" topic is" : L" topics are") +
+                L" in the index but not in the list. Delete " + (removedCount == 1 ? L"it" : L"them") +
+                L", with " + (removedCount == 1 ? L"its folder" : L"their folders") +
+                L" from the run that built " + (removedCount == 1 ? L"it" : L"them") + L"?\n" + removed +
+                L"\n\nCancel goes back to the list.";
+            if (MessageBoxW(hwnd_, question.c_str(), kAppName, MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK) {
+                rebuildIndexDialog(dlg.text());
+                return;
+            }
+            for (const pe::Topic& t : index_.topics)
+                if (!wanted.count(lowerAscii(t.name))) deleteTopicFolder(t);
+        }
+        orderTopics(topics, job.order);
+        const bool changed =
+            !std::equal(topics.begin(), topics.end(), index_.topics.begin(), index_.topics.end(),
+                        [](const pe::Topic& a, const pe::Topic& b) { return a.name == b.name; });
+        if (changed) {
+            hits_.clear();  // they point into the topics being moved or deleted
+            current_ = -1;
+            selected_ = {-1, -1};
+            index_.topics = std::move(topics);
+            writeIndexFile();
+            buildTree();
+            refresh();
+        }
         if (job.topics.empty()) {
-            std::vector<pe::Topic> topics = index_.topics;
-            orderTopics(topics, job.order);
-            if (!std::equal(topics.begin(), topics.end(), index_.topics.begin(), index_.topics.end(),
-                            [](const pe::Topic& a, const pe::Topic& b) { return a.name == b.name; })) {
-                hits_.clear();  // they point into the topics being moved
-                current_ = -1;
-                selected_ = {-1, -1};
-                index_.topics = std::move(topics);
-                writeIndexFile();
-                buildTree();
-                refresh();
-                MessageBoxW(hwnd_, L"Every topic in the list is already in the index, so nothing was built. The topics "
-                                   L"now follow the list's order.",
-                            kAppName, MB_OK | MB_ICONINFORMATION);
+            if (changed) {
+                MessageBoxW(hwnd_, L"Nothing new to build. The index now matches the list.", kAppName,
+                            MB_OK | MB_ICONINFORMATION);
                 return;
             }
             MessageBoxW(hwnd_, L"Every topic in the list is already in the index. Add new topics to the list, or "

@@ -80,6 +80,7 @@ private:
     void fitCurrentRange();
     void setCurrentTier(int tier);
     void deleteSelectedTopic();
+    void deleteTopicFolder(const pe::Topic& topic);
     void indexChangedByHand(const std::wstring& what);
     void showCoverageChart();
     const pe::Topic* topicOf(const NodeRef& node) const;
