@@ -242,7 +242,7 @@ def _parse_lines(value, doc):
 
 
 def tier_of(item):
-    """The range's "tier", 1 (core) to 5 (adjacent); 0 when missing or invalid."""
+    """The range's "tier", 1 (core) to 5 (incidental); 0 when missing or invalid."""
     t = item.get("tier") if isinstance(item, dict) else None
     if isinstance(t, str) and t.isdigit():
         t = int(t)

@@ -26,8 +26,8 @@ changes.
   **Show the model's analysis** (Ctrl+I) shows what the model wrote about the
   selected topic before converting it. Progress shows at the bottom; Cancel stops it.
   The model rates every passage's tier, how load-bearing it is for the topic
-  (1 core, 2 high precedence, 3 direct, 4 slight, 5 adjacent); lower tiers are
-  highlighted more lightly.
+  (1 core, 2 high precedence, 3 standard, 4 supporting, 5 incidental); lower
+  tiers are highlighted more lightly.
 - Edit the index by hand from the **Passage** menu: add the selection to the
   selected topic (Ctrl+Shift+A), remove the current passage (Ctrl+Shift+Del),
   fit it to the selection (Ctrl+Shift+F), or set its tier (Alt+1..5, Alt+0 for

@@ -78,7 +78,7 @@ json topicJson(const Topic& t, bool withSubtopics) {
 }  // namespace
 
 const char* tierName(int tier) {
-    static const char* const names[] = {"", "core", "high precedence", "direct", "slight", "adjacent"};
+    static const char* const names[] = {"", "core", "high precedence", "standard", "supporting", "incidental"};
     return tier >= 1 && tier <= kTierCount ? names[tier] : names[0];
 }
 

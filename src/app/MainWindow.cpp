@@ -930,7 +930,7 @@ void MainWindow::addSelectionToTopic() {
     r.prefix = pe::contextBefore(doc, r.start);
     r.suffix = pe::contextAfter(doc, r.end);
     r.touched = true;
-    r.tier = 3;  // "direct" until the user says otherwise (Alt+1..5)
+    r.tier = 3;  // "standard" until the user says otherwise (Alt+1..5)
     hits_.clear();  // adding to the vector may move the ranges they point to
     current_ = -1;
     pe::Topic& topic = nodeTopic(selected_.topic, selected_.sub);

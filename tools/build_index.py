@@ -14,7 +14,7 @@ Spec range forms:
     {"span": [start, end]}                     character offsets, for tools that
                                                already resolved the text
     any form may add "status"                  e.g. "fuzzy", carried into the index
-    any form may add "tier"                    1 (core) to 5 (adjacent), carried into the index
+    any form may add "tier"                    1 (core) to 5 (incidental), carried into the index
     {"lost": "text"}                           a range not found in the document,
                                                kept for the user to place
 

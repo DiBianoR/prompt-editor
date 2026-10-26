@@ -19,13 +19,19 @@ Each RANGE marks one passage of the document, in one of three forms:
 
 "line" is the line number where the passage starts. It is optional, but include it.
 
-"tier" says how load-bearing the passage is for this topic. Give every range one:
+"tier" says how load-bearing the passage is. Give every range one:
 
-  1  core             defines the behavior itself; without it the topic would work differently
-  2  high precedence  a rule that overrides, limits or takes priority over others on this topic, or one the prompt marks as important
-  3  direct           directly about the topic, ordinary weight
-  4  slight           touches the topic in passing, or only part of it is about the topic
-  5  adjacent         mainly about something else, relevant to the topic only indirectly
+  1  core             part of the agent's core behavior on this topic: removing or reversing it would
+                      damage or strongly change how the agent behaves here, or in general
+  2  high precedence  when it conflicts or creates friction with other instructions, on this topic or any
+                      other, it wins: hard limits, prohibitions, "always"/"never" rules, overrides, and
+                      anything the prompt marks as important
+  3  standard         a normal instruction on the topic, weighed evenly against everything else in the prompt
+  4  supporting       detail, an example, nuance, or a restatement of something said elsewhere; removing it
+                      would change the agent's behavior only a little
+  5  incidental       mainly about something else; bears on this topic only in passing or by implication
+
+Two questions decide most cases. Deletion: how much would the agent's behavior here change without this passage? Conflict: if it clashed with another instruction, would it win? A passage that is both core and high precedence is tier 1. Rate each passage against the other passages on this topic: usually only a few are tier 1 or 2 and most are tier 3 or 4. If nearly everything looks like the same tier, look again for the differences between them.
 
 Rules:
 

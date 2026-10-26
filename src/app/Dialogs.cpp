@@ -216,8 +216,8 @@ void CoverageChart::onCommand(int id, int) {
 void CoverageChart::onPaint(HDC dc, const RECT& rc) {
     // Tier shading matches the editor: tier 1 full colour, tier 5 faint.
     static const double strength[6] = {1.0, 1.0, 0.8, 0.6, 0.4, 0.25};
-    static const wchar_t* const tierNames[6] = {L"no tier", L"core", L"high precedence", L"direct", L"slight",
-                                                L"adjacent"};
+    static const wchar_t* const tierNames[6] = {L"no tier", L"core", L"high precedence", L"standard", L"supporting",
+                                                L"incidental"};
     const COLORREF bg = GetSysColor(COLOR_WINDOW), ink = GetSysColor(COLOR_WINDOWTEXT);
     const COLORREF grid = RGB(0xE2, 0xE2, 0xE2), muted = RGB(0x70, 0x70, 0x70);
     auto fade = [&](COLORREF c, double s) {

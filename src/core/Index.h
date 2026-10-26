@@ -30,11 +30,11 @@ struct Range {
     std::string suffix;
     bool touched = false;  // edited since the last LLM refresh
     AnchorStatus status = AnchorStatus::Exact;
-    int tier = 0;  // how load-bearing for its topic: 1 core ... 5 adjacent; 0 = not rated
+    int tier = 0;  // how load-bearing: 1 core ... 5 incidental; 0 = not rated
 };
 
 constexpr int kTierCount = 5;
-// "core", "high precedence", "direct", "slight", "adjacent"; "" for 0.
+// "core", "high precedence", "standard", "supporting", "incidental"; "" for 0.
 const char* tierName(int tier);
 int clampTier(long long tier);  // 1..5, or 0 when out of range
 
