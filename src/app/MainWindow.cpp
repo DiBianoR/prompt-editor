@@ -41,6 +41,7 @@ enum : int {
     IDM_TIER_1,  // ..IDM_TIER_1 + 4 for tiers 1-5
     IDM_TIER_NONE = IDM_TIER_1 + 5,
     IDM_DELETE_TOPIC,
+    IDM_FIND,
     IDC_TREE = 200,
     IDC_EDITOR,
     IDC_PREV_BUTTON,
@@ -63,6 +64,7 @@ constexpr int kIndicTopic = 8;    // ranges of the selection without a tier, in 
 constexpr int kIndicCurrent = 9;  // the hit Next/Previous is on
 constexpr int kIndicReview = 10;  // fuzzy or ambiguous anchors: verify these
 constexpr int kIndicTier1 = 11;   // 11..15: ranges of tiers 1-5, fading with the tier
+constexpr int kMarkCurrent = 1;   // margin marker on the lines of the hit Next/Previous is on
 constexpr int kTierAlpha[pe::kTierCount + 1] = {90, 125, 95, 70, 45, 25};  // [0] = no tier
 constexpr double kTierStrength[pe::kTierCount + 1] = {1.0, 1.0, 0.8, 0.6, 0.4, 0.25};
 constexpr COLORREF kGapColor = RGB(0xB0, 0xB0, 0xB0);
@@ -168,6 +170,8 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(nav, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(nav, MF_STRING, IDM_FOCUS_TOPICS, L"Go to &topics\tCtrl+1");
     AppendMenuW(nav, MF_STRING, IDM_FOCUS_EDITOR, L"Go to &document\tCtrl+2");
+    AppendMenuW(nav, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(nav, MF_STRING, IDM_FIND, L"&Find in document...\tCtrl+F");
     HMENU indexMenu = CreatePopupMenu();
     AppendMenuW(indexMenu, MF_STRING, IDM_REBUILD, L"&Build index with the model...\tCtrl+R");
     AppendMenuW(indexMenu, MF_STRING, IDM_REBUILD_TOPIC, L"Rebuild selected &topic");
@@ -175,7 +179,7 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(indexMenu, MF_STRING, IDM_SHOW_ANALYSIS, L"Show the model's &analysis\tCtrl+I");
     AppendMenuW(indexMenu, MF_STRING, IDM_COVERAGE_CHART, L"Topic co&verage chart\tCtrl+G");
-    AppendMenuW(indexMenu, MF_STRING, IDM_DELETE_TOPIC, L"&Delete selected topic...\tDel in topics");
+    AppendMenuW(indexMenu, MF_STRING, IDM_DELETE_TOPIC, L"&Delete selected topic...\tCtrl+Shift+Del");
     AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(indexMenu, MF_STRING, IDM_SETTINGS, L"LLM &settings...");
     HMENU tierMenu = CreatePopupMenu();
@@ -187,7 +191,7 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(tierMenu, MF_STRING, IDM_TIER_NONE, L"&No tier\tAlt+0");
     HMENU passage = CreatePopupMenu();
     AppendMenuW(passage, MF_STRING, IDM_ADD_SELECTION, L"&Add selection to topic\tCtrl+Shift+A");
-    AppendMenuW(passage, MF_STRING, IDM_REMOVE_RANGE, L"&Remove passage from topic\tCtrl+Shift+Del");
+    AppendMenuW(passage, MF_STRING, IDM_REMOVE_RANGE, L"&Remove passage from topic...\tDel in topics");
     AppendMenuW(passage, MF_STRING, IDM_FIT_RANGE, L"&Fit passage to selection\tCtrl+Shift+F");
     AppendMenuW(passage, MF_POPUP, reinterpret_cast<UINT_PTR>(tierMenu), L"Set &tier");
     HMENU bar = CreateMenu();
@@ -210,7 +214,8 @@ bool MainWindow::create(HINSTANCE instance, int show) {
         {FCONTROL | FVIRTKEY, 'I', IDM_SHOW_ANALYSIS},
         {FCONTROL | FVIRTKEY, 'G', IDM_COVERAGE_CHART},
         {FCONTROL | FSHIFT | FVIRTKEY, 'A', IDM_ADD_SELECTION},
-        {FCONTROL | FSHIFT | FVIRTKEY, VK_DELETE, IDM_REMOVE_RANGE},
+        {FCONTROL | FSHIFT | FVIRTKEY, VK_DELETE, IDM_DELETE_TOPIC},
+        {FCONTROL | FVIRTKEY, 'F', IDM_FIND},
         {FCONTROL | FSHIFT | FVIRTKEY, 'F', IDM_FIT_RANGE},
         {FALT | FVIRTKEY, '1', IDM_TIER_1},
         {FALT | FVIRTKEY, '2', IDM_TIER_1 + 1},
@@ -336,6 +341,11 @@ void MainWindow::setupEditor() {
 
     sci(SCI_INDICSETSTYLE, kIndicReview, INDIC_SQUIGGLEPIXMAP);
     sci(SCI_INDICSETFORE, kIndicReview, RGB(0xD0, 0x30, 0x30));
+
+    // The current passage's lines are shaded darker in the line-number margin.
+    sci(SCI_MARKERDEFINE, kMarkCurrent, SC_MARK_FULLRECT);
+    sci(SCI_MARKERSETBACKTRANSLUCENT, kMarkCurrent, (0x38 << 24) | RGB(0, 0, 0));
+    sci(SCI_SETMARGINMASKN, 0, 1 << kMarkCurrent);
 }
 
 void MainWindow::updateFonts() {
@@ -690,6 +700,7 @@ void MainWindow::applyIndicators() {
         sci(SCI_SETINDICATORCURRENT, indicForTier(tier));
         sci(SCI_INDICATORCLEARRANGE, 0, length);
     }
+    sci(SCI_MARKERDELETEALL, kMarkCurrent);
     for (int i = 0; i < static_cast<int>(hits_.size()); ++i) {
         const Hit& h = hits_[i];
         const sptr_t end = std::min<sptr_t>(static_cast<sptr_t>(h.end), length);
@@ -701,6 +712,9 @@ void MainWindow::applyIndicators() {
             sci(SCI_SETINDICATORCURRENT, kIndicCurrent);
             sci(SCI_SETINDICATORVALUE, SC_INDICVALUEBIT | darken(h.color, 0.55));
             sci(SCI_INDICATORFILLRANGE, start, end - start);
+            const sptr_t last = sci(SCI_LINEFROMPOSITION, std::max(start, end - 1));
+            for (sptr_t line = sci(SCI_LINEFROMPOSITION, start); line <= last; ++line)
+                sci(SCI_MARKERADD, line, kMarkCurrent);
         }
         if (h.range && pe::needsReview(h.range->status)) {
             sci(SCI_SETINDICATORCURRENT, kIndicReview);
@@ -948,6 +962,14 @@ void MainWindow::removeCurrentRange() {
                     kAppName, MB_OK | MB_ICONINFORMATION);
         return;
     }
+    std::wstring excerpt = widen(target->exact.substr(0, 160));
+    for (wchar_t& c : excerpt)
+        if (c == L'\r' || c == L'\n' || c == L'\t') c = L' ';
+    if (target->exact.size() > 160) excerpt += L"…";
+    const std::wstring question = L"Remove passage " + std::to_wstring(current_ + 1) + L" of " +
+                                  std::to_wstring(hits_.size()) + L" from the topic?\n\n\"" + excerpt +
+                                  L"\"\n\nThe text stays in the document.";
+    if (MessageBoxW(hwnd_, question.c_str(), kAppName, MB_OKCANCEL | MB_ICONQUESTION) != IDOK) return;
     for (pe::Topic& t : index_.topics)
         for (int j = -1; j < static_cast<int>(t.subtopics.size()); ++j) {
             auto& ranges = j < 0 ? t.ranges : t.subtopics[j].ranges;
@@ -1061,8 +1083,9 @@ LRESULT CALLBACK MainWindow::treeKeyProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
         reinterpret_cast<MainWindow*>(data)->next(wp == VK_RIGHT ? +1 : -1);
         return 0;
     }
-    if (msg == WM_KEYDOWN && wp == VK_DELETE) {
-        reinterpret_cast<MainWindow*>(data)->deleteSelectedTopic();
+    // Del removes the passage the counter is on; Ctrl+Shift+Del (an accelerator) deletes the topic.
+    if (msg == WM_KEYDOWN && wp == VK_DELETE && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+        reinterpret_cast<MainWindow*>(data)->removeCurrentRange();
         return 0;
     }
     if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, treeKeyProc, 1);
@@ -1905,7 +1928,67 @@ LRESULT CALLBACK MainWindow::wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     return self && self->editor_ ? self->handle(msg, wp, lp) : DefWindowProcW(hwnd, msg, wp, lp);
 }
 
+void MainWindow::openFind() {
+    if (findDlg_) {
+        SetFocus(findDlg_);
+        return;
+    }
+    // Start from a short one-line selection, if there is one.
+    const sptr_t a = sci(SCI_GETSELECTIONSTART), b = sci(SCI_GETSELECTIONEND);
+    if (b > a && b - a < 200) {
+        std::string sel(static_cast<size_t>(b - a) + 1, '\0');
+        sci(SCI_GETSELTEXT, 0, reinterpret_cast<sptr_t>(sel.data()));
+        sel.resize(static_cast<size_t>(b - a));
+        if (sel.find('\n') == std::string::npos) lstrcpynW(findText_, widen(sel).c_str(), static_cast<int>(std::size(findText_)));
+    }
+    find_ = {};
+    find_.lStructSize = sizeof find_;
+    find_.hwndOwner = hwnd_;
+    find_.Flags = FR_DOWN;
+    find_.lpstrFindWhat = findText_;
+    find_.wFindWhatLen = static_cast<WORD>(std::size(findText_));
+    findDlg_ = FindTextW(&find_);
+}
+
+// Finds the next match from the selection in the dialog's direction, wrapping
+// around the document once.
+void MainWindow::findNext(const FINDREPLACEW& fr) {
+    const std::string what = narrow(fr.lpstrFindWhat);
+    if (what.empty()) return;
+    int flags = 0;
+    if (fr.Flags & FR_MATCHCASE) flags |= SCFIND_MATCHCASE;
+    if (fr.Flags & FR_WHOLEWORD) flags |= SCFIND_WHOLEWORD;
+    sci(SCI_SETSEARCHFLAGS, flags);
+    const bool down = fr.Flags & FR_DOWN;
+    const sptr_t length = sci(SCI_GETLENGTH);
+    const sptr_t from = down ? sci(SCI_GETSELECTIONEND) : sci(SCI_GETSELECTIONSTART);
+    auto search = [&](sptr_t start, sptr_t end) {
+        sci(SCI_SETTARGETRANGE, start, end);  // start > end searches backwards
+        return sci(SCI_SEARCHINTARGET, what.size(), reinterpret_cast<sptr_t>(what.c_str()));
+    };
+    sptr_t found = down ? search(from, length) : search(from, 0);
+    if (found < 0) found = down ? search(0, from) : search(length, from);
+    if (found < 0) {
+        const std::wstring text = L"\"" + std::wstring(fr.lpstrFindWhat) + L"\" is not in the document.";
+        MessageBoxW(findDlg_ ? findDlg_ : hwnd_, text.c_str(), kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const sptr_t end = sci(SCI_GETTARGETEND);
+    sci(SCI_SETSEL, found, end);
+    sci(SCI_SCROLLRANGE, found, end);
+}
+
 LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == findMsg_ && findMsg_) {
+        const auto* fr = reinterpret_cast<const FINDREPLACEW*>(lp);
+        if (fr->Flags & FR_DIALOGTERM) {
+            findDlg_ = nullptr;
+            SetFocus(editor_);
+        } else if (fr->Flags & FR_FINDNEXT) {
+            findNext(*fr);
+        }
+        return 0;
+    }
     switch (msg) {
         case WM_SIZE:
             layout();
@@ -1991,6 +2074,7 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_FIT_RANGE: fitCurrentRange(); return 0;
                 case IDM_TIER_NONE: setCurrentTier(0); return 0;
                 case IDM_DELETE_TOPIC: deleteSelectedTopic(); return 0;
+                case IDM_FIND: openFind(); return 0;
                 case IDC_REVIEW_PLACE: placeLost(); return 0;
                 case IDC_REVIEW_DISCARD: discardLost(); return 0;
             }

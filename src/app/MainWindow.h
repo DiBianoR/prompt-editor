@@ -3,6 +3,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <commdlg.h>
 
 #include <atomic>
 #include <filesystem>
@@ -31,6 +32,7 @@ public:
     bool open(const std::filesystem::path& docPath, std::filesystem::path indexPath = {});
     HWND hwnd() const { return hwnd_; }
     HACCEL accelerators() const { return accel_; }
+    HWND findDialog() const { return findDlg_; }  // modeless: the message loop routes its keys
 
 private:
     // A tree node: a topic (sub < 0), a subtopic, or the unindexed-text node.
@@ -81,6 +83,10 @@ private:
     void setCurrentTier(int tier);
     void deleteSelectedTopic();
     void deleteTopicFolder(const pe::Topic& topic);
+
+    // Find in the document (the standard Find dialog).
+    void openFind();
+    void findNext(const FINDREPLACEW& fr);
     void indexChangedByHand(const std::wstring& what);
     void showCoverageChart();
     const pe::Topic* topicOf(const NodeRef& node) const;
@@ -161,6 +167,10 @@ private:
     // The line above the editor: text, the current passage's tier (on a chip), more text.
     std::tuple<std::wstring, std::wstring, std::wstring> navText_;
     COLORREF navTierColor_ = 0;
+    HWND findDlg_ = nullptr;
+    FINDREPLACEW find_{};
+    wchar_t findText_[256] = {};
+    UINT findMsg_ = RegisterWindowMessageW(FINDMSGSTRINGW);
 
     std::filesystem::path docPath_;
     std::filesystem::path indexPath_;

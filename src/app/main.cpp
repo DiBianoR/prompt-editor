@@ -25,6 +25,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (window.findDialog() && IsDialogMessageW(window.findDialog(), &msg)) continue;
         if (TranslateAcceleratorW(window.hwnd(), window.accelerators(), &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);

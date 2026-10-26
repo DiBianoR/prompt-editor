@@ -35,11 +35,13 @@ changes.
   (1 core, 2 high precedence, 3 standard, 4 supporting, 5 incidental); lower
   tiers are highlighted more lightly.
 - Edit the index by hand from the **Passage** menu: add the selection to the
-  selected topic (Ctrl+Shift+A), remove the current passage (Ctrl+Shift+Del),
-  fit it to the selection (Ctrl+Shift+F), or set its tier (Alt+1..5, Alt+0 for
-  none). In the topic list, Left/Right step through the passages like
-  Previous/Next, and Delete removes the selected topic or subtopic from the
-  index (after asking; the document is not changed). The list shows each topic's share of the document;
+  selected topic (Ctrl+Shift+A), remove the current passage (Delete in the topic
+  list), fit it to the selection (Ctrl+Shift+F), or set its tier (Alt+1..5,
+  Alt+0 for none). In the topic list, Left/Right step through the passages like
+  Previous/Next; the current passage's lines are shaded in the line-number
+  margin. Ctrl+Shift+Delete removes the selected topic or subtopic from the
+  index (both deletes ask first; the document is not changed). Ctrl+F finds
+  text in the document. The list shows each topic's share of the document;
   **Index > Topic coverage chart** (Ctrl+G) draws them as bars, biggest first.
 - Each topic is saved as soon as it is finished, so stopping a run (Cancel,
   closing the app, an error, even a crash) loses at most the topic in progress:
