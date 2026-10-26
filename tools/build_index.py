@@ -14,6 +14,7 @@ Spec range forms:
     {"span": [start, end]}                     character offsets, for tools that
                                                already resolved the text
     any form may add "status"                  e.g. "fuzzy", carried into the index
+    any form may add "tier"                    1 (core) to 5 (adjacent), carried into the index
     {"lost": "text"}                           a range not found in the document,
                                                kept for the user to place
 
@@ -87,8 +88,11 @@ class ByteOffsets:
 
 def build_range(text, offsets, spec, where, covered):
     if "lost" in spec:
-        return {"start": 0, "end": 0, "exact": spec["lost"], "prefix": "", "suffix": "",
-                "touched": False, "status": "orphaned"}
+        out = {"start": 0, "end": 0, "exact": spec["lost"], "prefix": "", "suffix": "",
+               "touched": False, "status": "orphaned"}
+        if spec.get("tier"):
+            out["tier"] = spec["tier"]
+        return out
     start, end = resolve(text, spec, where)
     covered.append((start, end))
     out = {
@@ -101,6 +105,8 @@ def build_range(text, offsets, spec, where, covered):
     }
     if spec.get("status"):
         out["status"] = spec["status"]
+    if spec.get("tier"):
+        out["tier"] = spec["tier"]
     return out
 
 

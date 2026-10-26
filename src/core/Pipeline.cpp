@@ -159,11 +159,14 @@ void applyFixes(const SourceDocument& doc, const nlohmann::json& reply, TopicSpa
     for (const auto& [id, fix] : fixes) {
         auto f = std::find_if(failures.begin(), failures.end(), [&](const Failure& x) { return x.id == id; });
         if (f == failures.end() || !fix.is_object()) continue;
+        // A fix that leaves out the tier keeps the one the range was given.
+        nlohmann::json item = fix;
+        if (!item.contains("tier") && f->item.is_object() && f->item.contains("tier")) item["tier"] = f->item["tier"];
         try {
-            nodeOf(topic, f->node).spans.push_back(resolveRange(doc, fix));
+            nodeOf(topic, f->node).spans.push_back(resolveRange(doc, item));
             failures.erase(f);
         } catch (const ResolveError& e) {
-            f->item = fix;
+            f->item = item;
             f->reason = e.what();
             say(hooks, "  " + id + " still unmatched: " + e.what());
         }
@@ -210,6 +213,7 @@ Range toRange(const Span& s) {
     r.end = s.end;
     // Exact and normalized matches are simply correct; the others need a look.
     r.status = needsReview(s.status) ? s.status : AnchorStatus::Exact;
+    r.tier = s.tier;
     return r;
 }
 
@@ -265,7 +269,8 @@ const nlohmann::json& topicSchema() {
                                   {"quote", {{"type", "string"}}},
                                   {"from", {{"type", "string"}}},
                                   {"to", {{"type", "string"}}},
-                                  {"line", {{"type", "integer"}}}}}};
+                                  {"line", {{"type", "integer"}}},
+                                  {"tier", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}}};
         nlohmann::json nodeProps = {{"name", {{"type", "string"}}},
                                     {"note", {{"type", "string"}}},
                                     {"ranges", {{"type", "array"}, {"items", range}}}};
@@ -291,7 +296,8 @@ const nlohmann::json& repairSchema() {
                 {"quote", {{"type", "string"}}},
                 {"from", {{"type", "string"}}},
                 {"to", {{"type", "string"}}},
-                {"line", {{"type", "integer"}}}}},
+                {"line", {{"type", "integer"}}},
+                {"tier", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}},
               {"required", {"id"}}}}}}}},
         {"required", {"fixes"}}};
     return schema;
@@ -438,7 +444,10 @@ TopicOutcome indexTopic(ChatClient& llm, const SourceDocument& doc, const TopicR
                        " still unmatched");
     }
     for (const Failure& f : failures) {
-        nodeOf(topic, f.node).lost.push_back({describe(f.item), f.reason});
+        int tier = 0;
+        if (f.item.is_object() && f.item.contains("tier") && f.item["tier"].is_number_integer())
+            tier = clampTier(f.item["tier"].get<long long>());
+        nodeOf(topic, f.node).lost.push_back({describe(f.item), f.reason, tier});
         say(hooks, "  kept as lost: " + describe(f.item).substr(0, 80));
     }
 
@@ -466,6 +475,7 @@ Topic toIndexTopic(const TopicSpans& spans, const Index* previous, std::set<std:
             Range r;  // no place in the document yet; the user places or discards it
             r.exact = l.text;
             r.status = AnchorStatus::Orphaned;
+            r.tier = l.tier;
             to.ranges.push_back(r);
         }
     };

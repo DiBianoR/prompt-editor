@@ -167,6 +167,29 @@ std::vector<Gap> findUnindexed(const std::string& doc, std::vector<std::pair<siz
     return gaps;
 }
 
+size_t countChars(const std::string& s) {
+    size_t n = 0;
+    for (char c : s) n += !isContinuation(static_cast<unsigned char>(c));
+    return n;
+}
+
+std::array<size_t, kTierCount + 1> coverageByTier(const std::string& doc, const std::vector<TierSpan>& spans) {
+    std::array<size_t, kTierCount + 1> counts{};
+    if (spans.empty()) return counts;
+    // Rank per byte: tiers 1..5 as themselves, unrated as 6 (below any tier), 0xFF uncovered.
+    constexpr unsigned char kNone = 0xFF, kUnrated = kTierCount + 1;
+    std::vector<unsigned char> best(doc.size(), kNone);
+    for (const TierSpan& s : spans) {
+        const unsigned char rank = s.tier >= 1 && s.tier <= kTierCount ? static_cast<unsigned char>(s.tier) : kUnrated;
+        for (size_t b = std::min(s.start, doc.size()); b < std::min(s.end, doc.size()); ++b)
+            best[b] = std::min(best[b], rank);
+    }
+    for (size_t b = 0; b < doc.size(); ++b)
+        if (best[b] != kNone && !isContinuation(static_cast<unsigned char>(doc[b])))
+            ++counts[best[b] == kUnrated ? 0 : best[b]];
+    return counts;
+}
+
 std::string sha256Hex(const std::string& bytes) {
     unsigned char digest[32];
     NTSTATUS status = BCryptHash(BCRYPT_SHA256_ALG_HANDLE, nullptr, 0,

@@ -50,8 +50,8 @@ def reply_for(messages):
         # With --unfixable the bad quote stays bad, so it ends up lost.
         return json.dumps({"fixes": [] if ARGS.unfixable else [{"id": "r1", "lines": "1"}]})
     lines = matching_lines(messages)
-    ranges = [{"lines": str(n), "line": n} for n in lines]
-    ranges.append({"quote": "This sentence is not in the document anywhere at all.", "line": 1})
+    ranges = [{"lines": str(n), "line": n, "tier": i % 5 + 1} for i, n in enumerate(lines)]
+    ranges.append({"quote": "This sentence is not in the document anywhere at all.", "line": 1, "tier": 4})
     doc = {"name": topic_of(messages), "note": "", "ranges": ranges[:1],
            "subtopics": [{"name": "Mentions", "note": "", "ranges": ranges[1:]}] if len(ranges) > 1 else []}
     return "```json\n" + json.dumps(doc) + "\n```"

@@ -63,6 +63,7 @@ struct TopicRequest {
 struct LostRange {
     std::string text;    // the model's quote, or "from ... to" ends
     std::string reason;  // why it did not match
+    int tier = 0;
 };
 
 struct TopicSpans {

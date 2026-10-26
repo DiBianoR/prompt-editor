@@ -16,6 +16,7 @@
 #include "core/Anchor.h"
 #include "core/Index.h"
 #include "core/Pipeline.h"
+#include "core/Text.h"
 
 class LlmClient;
 struct RunProgress;
@@ -43,10 +44,12 @@ private:
         size_t end;
         COLORREF color;
         const pe::Range* range;  // null for unindexed text
+        int tier;                // 0 = not rated
     };
 
     static LRESULT CALLBACK wndProc(HWND, UINT, WPARAM, LPARAM);
     static LRESULT CALLBACK overviewProc(HWND, UINT, WPARAM, LPARAM);
+    static LRESULT CALLBACK treeKeyProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
 
     void createChildren();
@@ -64,7 +67,18 @@ private:
 
     void buildTree();
     void relabelTree();
-    std::wstring nodeLabel(const NodeRef& node) const;
+    std::wstring nodeLabel(const NodeRef& node, const std::string& doc) const;
+    // The node's ranges as spans with tiers (a topic includes its subtopics).
+    std::vector<pe::TierSpan> nodeSpans(const NodeRef& node) const;
+
+    // Editing the index by hand.
+    pe::Range* currentRange();
+    void addSelectionToTopic();
+    void removeCurrentRange();
+    void fitCurrentRange();
+    void setCurrentTier(int tier);
+    void indexChangedByHand(const std::wstring& what);
+    void showCoverageChart();
     const pe::Topic* topicOf(const NodeRef& node) const;
 
     void selectNode(const NodeRef& node);

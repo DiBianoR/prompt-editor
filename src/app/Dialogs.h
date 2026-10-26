@@ -3,8 +3,10 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+#include <array>
 #include <map>
 #include <string>
+#include <vector>
 
 #include "Settings.h"
 
@@ -20,6 +22,10 @@ protected:
     virtual void onCreate() = 0;
     virtual void onLayout(int width, int height) = 0;
     virtual void onCommand(int id, int code) = 0;
+    // Windows that draw their own content set customPaint_ and override onPaint
+    // (called double-buffered, with the background already filled).
+    virtual void onPaint(HDC, const RECT&) {}
+    bool customPaint_ = false;
 
     void end(int result);
     HWND add(const wchar_t* cls, const wchar_t* text, DWORD style, int id = 0, DWORD exStyle = 0);
@@ -92,6 +98,37 @@ private:
 
     std::wstring title_, text_, source_;
     HWND edit_{}, source_label_{}, close_{};
+};
+
+// One bar of the coverage chart: characters covered, split by tier ([0] = no tier).
+struct CoverageRow {
+    std::wstring name;
+    COLORREF color = 0;
+    std::array<size_t, 6> chars{};
+    size_t total() const {
+        size_t n = 0;
+        for (size_t c : chars) n += c;
+        return n;
+    }
+};
+
+// Horizontal bars, 0-100% of the document, biggest topic first; each bar is
+// shaded by how much of it is each tier.
+class CoverageChart : public ModalWindow {
+public:
+    CoverageChart(std::vector<CoverageRow> rows, size_t docChars) : rows_(std::move(rows)), docChars_(docChars) {}
+    void show(HWND owner);
+
+private:
+    void onCreate() override;
+    void onLayout(int width, int height) override;
+    void onCommand(int id, int code) override;
+    void onPaint(HDC dc, const RECT& rc) override;
+
+    std::vector<CoverageRow> rows_;
+    size_t docChars_;
+    HWND close_{};
+    int buttonsTop_ = 0;
 };
 
 std::wstring widen(const std::string& s);

@@ -95,11 +95,19 @@ class ResolveTests(unittest.TestCase):
         self.assertEqual(clean_quote("`x = 1`"), "x = 1")
 
     def test_merge(self):
-        a = resolve_range(self.doc, {"lines": "4"})
-        b = resolve_range(self.doc, {"quote": "Always read a file"})
+        a = resolve_range(self.doc, {"lines": "4", "tier": 3})
+        b = resolve_range(self.doc, {"quote": "Always read a file", "tier": 1})
         c = resolve_range(self.doc, {"lines": "6"})
         merged = merge_spans([a, b, c], self.doc.text)
         self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0][3], 1)  # the most load-bearing tier wins
+        self.assertEqual(merged[1][3], 0)
+
+    def test_tier(self):
+        self.assertEqual(resolve_range(self.doc, {"lines": "4", "tier": 2})[3], 2)
+        self.assertEqual(resolve_range(self.doc, {"lines": "4", "tier": "5"})[3], 5)
+        self.assertEqual(resolve_range(self.doc, {"lines": "4", "tier": 9})[3], 0)
+        self.assertEqual(resolve_range(self.doc, {"lines": "4"})[3], 0)
 
 
 class FakeLLM:
@@ -148,19 +156,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(len(topic["spans"]), 1)
         email = topic["subtopics"][0]
         self.assertEqual(email["note"], "Stated twice.")
-        self.assertEqual([doc.line_of(s) for s, _, _ in email["spans"]], [9, 10])
+        self.assertEqual([doc.line_of(sp[0]) for sp in email["spans"]], [9, 10])
 
     def test_unfixable_is_kept_as_lost(self):
         doc = Document(DOC)
         bad = {"name": "X", "subtopics": [],
-               "ranges": [{"lines": "4"}, {"quote": "This sentence is nowhere in the document at all."}]}
+               "ranges": [{"lines": "4", "tier": 1}, {"quote": "This sentence is nowhere in the document at all.", "tier": 4}]}
         llm = FakeLLM(["findings", "not json", json.dumps(bad), '{"fixes": []}',
                        '{"fixes": [{"id": "r1", "quote": "Still not in the document, sorry about that."}]}'])
         with tempfile.TemporaryDirectory() as tmp:
             topic, lost = llm_index.index_topic(llm, doc, "X", "", 2, Path(tmp) / "t")
             self.assertEqual(llm.calls, 5)
             self.assertEqual(len(topic["spans"]), 1)  # the matched range survived both rounds
-            self.assertEqual(topic["lost"], ["Still not in the document, sorry about that."])
+            # The fix gave no tier, so the lost range keeps the one it was given.
+            self.assertEqual(topic["lost"], [{"text": "Still not in the document, sorry about that.", "tier": 4}])
             doc_path = Path(tmp) / "agent.md"
             doc_path.write_bytes(DOC.encode("utf-8"))
             spec = llm_index.new_topic_spec(topic, {}, set())
@@ -168,6 +177,8 @@ class PipelineTests(unittest.TestCase):
             orphan = index["topics"][0]["ranges"][-1]
             self.assertEqual(orphan["status"], "orphaned")
             self.assertEqual(orphan["exact"], "Still not in the document, sorry about that.")
+            self.assertEqual(orphan["tier"], 4)
+            self.assertEqual(index["topics"][0]["ranges"][0]["tier"], 1)
 
     def test_build_writes_index(self):
         with tempfile.TemporaryDirectory() as tmp:

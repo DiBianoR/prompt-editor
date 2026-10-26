@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -37,5 +38,19 @@ std::string contextAfter(const std::string& doc, size_t offset, size_t chars = k
 std::vector<Gap> findUnindexed(const std::string& doc, std::vector<std::pair<size_t, size_t>> covered);
 
 std::string sha256Hex(const std::string& bytes);
+
+// Number of characters (code points) in a UTF-8 string.
+size_t countChars(const std::string& s);
+
+struct TierSpan {
+    size_t start;
+    size_t end;
+    int tier;  // 0 = not rated
+};
+
+// Characters of doc covered by the spans, overlaps counted once. Each covered
+// character is credited to the most load-bearing tier covering it: [1]..[5] are
+// tiers, [0] is ranges without a tier.
+std::array<size_t, kTierCount + 1> coverageByTier(const std::string& doc, const std::vector<TierSpan>& spans);
 
 }  // namespace pe

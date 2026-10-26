@@ -218,7 +218,32 @@ std::string cleanQuote(const std::string& s) {
     return out;
 }
 
+namespace {
+
+int tierOf(const nlohmann::json& item) {
+    auto it = item.find("tier");
+    if (it == item.end()) return 0;
+    if (it->is_number_integer()) return clampTier(it->get<long long>());
+    if (it->is_string()) {
+        const std::string s = it->get<std::string>();
+        if (s.size() == 1 && s[0] >= '1' && s[0] <= '5') return s[0] - '0';
+    }
+    return 0;
+}
+
+Span resolveRangeUntiered(const SourceDocument& doc, const nlohmann::json& item);
+
+}  // namespace
+
 Span resolveRange(const SourceDocument& doc, const nlohmann::json& item) {
+    Span span = resolveRangeUntiered(doc, item);
+    if (item.is_object()) span.tier = tierOf(item);
+    return span;
+}
+
+namespace {
+
+Span resolveRangeUntiered(const SourceDocument& doc, const nlohmann::json& item) {
     if (!item.is_object()) throw ResolveError("not a range object: " + item.dump());
     const size_t hint = hintOf(item);
     const std::string& t = doc.text();
@@ -273,6 +298,8 @@ Span resolveRange(const SourceDocument& doc, const nlohmann::json& item) {
     throw ResolveError("range needs \"lines\", \"quote\", or \"from\" and \"to\": " + item.dump());
 }
 
+}  // namespace
+
 std::vector<Span> mergeSpans(std::vector<Span> spans, const std::string& text) {
     std::sort(spans.begin(), spans.end(), [](const Span& a, const Span& b) {
         return a.start != b.start ? a.start < b.start : a.end < b.end;
@@ -286,6 +313,7 @@ std::vector<Span> mergeSpans(std::vector<Span> spans, const std::string& text) {
             if (between) {
                 last.end = std::max(last.end, s.end);
                 last.status = worse(last.status, s.status);
+                if (s.tier && (!last.tier || s.tier < last.tier)) last.tier = s.tier;
                 continue;
             }
         }

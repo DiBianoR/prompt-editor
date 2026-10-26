@@ -27,6 +27,7 @@ Range parseRange(const json& j) {
     r.suffix = optString(j, "suffix");
     r.touched = j.value("touched", false);
     r.status = statusFromString(optString(j, "status"));
+    if (auto t = j.find("tier"); t != j.end() && t->is_number_integer()) r.tier = clampTier(t->get<long long>());
     if (r.end < r.start) throw std::runtime_error("range end before start");
     return r;
 }
@@ -52,6 +53,7 @@ json rangeJson(const Range& r) {
     j["prefix"] = r.prefix;
     j["suffix"] = r.suffix;
     j["touched"] = r.touched;
+    if (r.tier) j["tier"] = r.tier;
     // Only statuses that still mean something after a save are written.
     if (needsReview(r.status)) j["status"] = toString(r.status);
     return j;
@@ -74,6 +76,13 @@ json topicJson(const Topic& t, bool withSubtopics) {
 }
 
 }  // namespace
+
+const char* tierName(int tier) {
+    static const char* const names[] = {"", "core", "high precedence", "direct", "slight", "adjacent"};
+    return tier >= 1 && tier <= kTierCount ? names[tier] : names[0];
+}
+
+int clampTier(long long tier) { return tier >= 1 && tier <= kTierCount ? static_cast<int>(tier) : 0; }
 
 const char* toString(AnchorStatus status) {
     return kStatusNames[static_cast<int>(status)];

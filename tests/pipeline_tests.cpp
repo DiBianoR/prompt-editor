@@ -7,6 +7,7 @@
 
 #include "core/Pipeline.h"
 #include "core/Resolve.h"
+#include "core/Text.h"
 
 using namespace pe;
 using json = nlohmann::json;
@@ -99,9 +100,36 @@ void testFromTo() {
 }
 
 void testMerge() {
-    std::vector<Span> spans = {resolve({{"lines", "4"}}), resolve({{"quote", "Always read a file"}}),
+    std::vector<Span> spans = {resolve({{"lines", "4"}, {"tier", 3}}), resolve({{"quote", "Always read a file"}, {"tier", 1}}),
                                resolve({{"lines", "6"}})};
-    CHECK(mergeSpans(spans, kDoc).size() == 2);
+    const auto merged = mergeSpans(spans, kDoc);
+    CHECK(merged.size() == 2);
+    CHECK(merged[0].tier == 1);  // the most load-bearing tier wins
+    CHECK(merged[1].tier == 0);
+}
+
+void testCoverage() {
+    const std::string doc = "ab\xC3\xA9" "cdef";  // "abécdef": 7 characters, 8 bytes
+    CHECK(countChars(doc) == 7);
+    // [0,4) "abé" tier 3; [2,6) "écd" tier 1 overlapping it; [6,8) "ef" unrated.
+    const auto c = coverageByTier(doc, {{0, 4, 3}, {2, 6, 1}, {6, 8, 0}});
+    CHECK(c[1] == 3);  // é, c, d
+    CHECK(c[3] == 2);  // a, b
+    CHECK(c[0] == 2);  // e, f
+    CHECK(c[2] == 0 && c[4] == 0 && c[5] == 0);
+}
+
+void testTier() {
+    CHECK(resolve({{"lines", "4"}, {"tier", 2}}).tier == 2);
+    CHECK(resolve({{"lines", "4"}, {"tier", "5"}}).tier == 5);
+    CHECK(resolve({{"lines", "4"}, {"tier", 9}}).tier == 0);
+    CHECK(resolve({{"lines", "4"}}).tier == 0);
+    CHECK(std::string(tierName(2)) == "high precedence" && std::string(tierName(0)).empty());
+    Range r;
+    r.tier = 4;
+    Index index;
+    index.topics.push_back({"t", "T", "#000000", "", {r}, {}});
+    CHECK(parseIndex(serializeIndex(index)).topics[0].ranges[0].tier == 4);
 }
 
 void testReplyParsing() {
@@ -192,7 +220,8 @@ void testFindFormatRepair() {
 
 void testUnfixableIsKeptAsLost() {
     json bad = {{"name", "X"},
-                {"ranges", json::array({{{"lines", "4"}}, {{"quote", "This sentence is nowhere in the document at all."}}})},
+                {"ranges", json::array({{{"lines", "4"}, {"tier", 1}},
+                                        {{"quote", "This sentence is nowhere in the document at all."}, {"tier", 4}}})},
                 {"subtopics", json::array()}};
     FakeLLM llm({"findings", "not json", bad.dump(), R"({"fixes": []})",
                  R"({"fixes": [{"id": "r1", "quote": "Still not in the document, sorry about that."}]})"});
@@ -202,11 +231,14 @@ void testUnfixableIsKeptAsLost() {
     CHECK(out.topic.spans.size() == 1);  // the matched range survived both repair rounds
     CHECK(out.topic.lost.size() == 1);
     CHECK(out.topic.lost[0].text == "Still not in the document, sorry about that.");
+    CHECK(out.topic.lost[0].tier == 4);  // the fix gave no tier, so the original one is kept
+    CHECK(out.topic.spans[0].tier == 1);
 
     std::set<std::string> used;
     Topic t = toIndexTopic(out.topic, nullptr, used, 0);
     CHECK(t.ranges.size() == 2);
     CHECK(t.ranges[1].status == AnchorStatus::Orphaned && t.ranges[1].exact == out.topic.lost[0].text);
+    CHECK(t.ranges[0].tier == 1 && t.ranges[1].tier == 4);
     Index index = assembleIndex("agent.md", kDoc, {t});
     CHECK(index.topics[0].ranges[1].status == AnchorStatus::Orphaned);  // kept through assembly
     CHECK(parseIndex(serializeIndex(index)).topics[0].ranges[1].status == AnchorStatus::Orphaned);
@@ -258,6 +290,8 @@ int main() {
         {"quotes", testQuotes},
         {"from/to", testFromTo},
         {"merge", testMerge},
+        {"tier", testTier},
+        {"coverage", testCoverage},
         {"reply parsing", testReplyParsing},
         {"prompts", testPrompts},
         {"find, format, repair", testFindFormatRepair},

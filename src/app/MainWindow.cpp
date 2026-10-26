@@ -34,6 +34,12 @@ enum : int {
     IDM_CANCEL_INDEXING,
     IDM_SETTINGS,
     IDM_SHOW_ANALYSIS,
+    IDM_COVERAGE_CHART,
+    IDM_ADD_SELECTION,
+    IDM_REMOVE_RANGE,
+    IDM_FIT_RANGE,
+    IDM_TIER_1,  // ..IDM_TIER_1 + 4 for tiers 1-5
+    IDM_TIER_NONE = IDM_TIER_1 + 5,
     IDC_TREE = 200,
     IDC_EDITOR,
     IDC_PREV_BUTTON,
@@ -52,10 +58,15 @@ enum : int {
 constexpr UINT WM_APP_REFRESH = WM_APP + 1;
 constexpr UINT WM_APP_JOB_LOG = WM_APP + 2;   // lParam: std::wstring*, owned by the receiver
 constexpr UINT WM_APP_JOB_DONE = WM_APP + 3;  // lParam: JobResult*, owned by the receiver
-constexpr int kIndicTopic = 8;    // every range of the selection, in its topic color
+constexpr int kIndicTopic = 8;    // ranges of the selection without a tier, in the topic color
 constexpr int kIndicCurrent = 9;  // the hit Next/Previous is on
 constexpr int kIndicReview = 10;  // fuzzy or ambiguous anchors: verify these
+constexpr int kIndicTier1 = 11;   // 11..15: ranges of tiers 1-5, fading with the tier
+constexpr int kTierAlpha[pe::kTierCount + 1] = {90, 125, 95, 70, 45, 25};  // [0] = no tier
+constexpr double kTierStrength[pe::kTierCount + 1] = {1.0, 1.0, 0.8, 0.6, 0.4, 0.25};
 constexpr COLORREF kGapColor = RGB(0xB0, 0xB0, 0xB0);
+
+int indicForTier(int tier) { return tier >= 1 && tier <= pe::kTierCount ? kIndicTier1 + tier - 1 : kIndicTopic; }
 
 const wchar_t kMainClass[] = L"PromptEditorMain";
 const wchar_t kOverviewClass[] = L"PromptEditorOverview";
@@ -74,6 +85,20 @@ COLORREF parseColor(const std::string& hex, COLORREF fallback) {
 COLORREF darken(COLORREF c, double f) {
     return RGB(static_cast<int>(GetRValue(c) * f), static_cast<int>(GetGValue(c) * f),
                static_cast<int>(GetBValue(c) * f));
+}
+
+// Mixes c toward the background: strength 1 = c, 0 = background.
+COLORREF fade(COLORREF c, double strength, COLORREF background) {
+    auto mix = [&](int a, int b) { return static_cast<int>(a * strength + b * (1 - strength)); };
+    return RGB(mix(GetRValue(c), GetRValue(background)), mix(GetGValue(c), GetGValue(background)),
+               mix(GetBValue(c), GetBValue(background)));
+}
+
+std::wstring percent(size_t part, size_t whole) {
+    if (whole == 0 || part == 0) return L"0%";
+    const double p = 100.0 * part / whole;
+    if (p < 1) return L"<1%";
+    return std::to_wstring(static_cast<int>(p + 0.5)) + L"%";
 }
 
 bool readFile(const std::filesystem::path& p, std::string& out) {
@@ -137,8 +162,8 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
     HMENU nav = CreatePopupMenu();
-    AppendMenuW(nav, MF_STRING, IDM_NEXT, L"&Next match\tF3 / Alt+Down");
-    AppendMenuW(nav, MF_STRING, IDM_PREV, L"&Previous match\tShift+F3 / Alt+Up");
+    AppendMenuW(nav, MF_STRING, IDM_NEXT, L"&Next match\tF3 / Alt+Down / Right in topics");
+    AppendMenuW(nav, MF_STRING, IDM_PREV, L"&Previous match\tShift+F3 / Alt+Up / Left in topics");
     AppendMenuW(nav, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(nav, MF_STRING, IDM_FOCUS_TOPICS, L"Go to &topics\tCtrl+1");
     AppendMenuW(nav, MF_STRING, IDM_FOCUS_EDITOR, L"Go to &document\tCtrl+2");
@@ -148,11 +173,25 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     AppendMenuW(indexMenu, MF_STRING, IDM_CANCEL_INDEXING, L"&Cancel indexing");
     AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(indexMenu, MF_STRING, IDM_SHOW_ANALYSIS, L"Show the model's &analysis\tCtrl+I");
+    AppendMenuW(indexMenu, MF_STRING, IDM_COVERAGE_CHART, L"Topic co&verage chart\tCtrl+G");
     AppendMenuW(indexMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(indexMenu, MF_STRING, IDM_SETTINGS, L"LLM &settings...");
+    HMENU tierMenu = CreatePopupMenu();
+    for (int t = 1; t <= pe::kTierCount; ++t) {
+        const std::wstring label = L"&" + std::to_wstring(t) + L"  " + widen(pe::tierName(t)) + L"\tAlt+" +
+                                   std::to_wstring(t);
+        AppendMenuW(tierMenu, MF_STRING, IDM_TIER_1 + t - 1, label.c_str());
+    }
+    AppendMenuW(tierMenu, MF_STRING, IDM_TIER_NONE, L"&No tier\tAlt+0");
+    HMENU passage = CreatePopupMenu();
+    AppendMenuW(passage, MF_STRING, IDM_ADD_SELECTION, L"&Add selection to topic\tCtrl+Shift+A");
+    AppendMenuW(passage, MF_STRING, IDM_REMOVE_RANGE, L"&Remove passage from topic\tCtrl+Shift+Del");
+    AppendMenuW(passage, MF_STRING, IDM_FIT_RANGE, L"&Fit passage to selection\tCtrl+Shift+F");
+    AppendMenuW(passage, MF_POPUP, reinterpret_cast<UINT_PTR>(tierMenu), L"Set &tier");
     HMENU bar = CreateMenu();
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), L"&File");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(nav), L"&Navigate");
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(passage), L"&Passage");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(indexMenu), L"&Index");
 
     ACCEL keys[] = {
@@ -167,6 +206,16 @@ bool MainWindow::create(HINSTANCE instance, int show) {
         {FCONTROL | FVIRTKEY, '2', IDM_FOCUS_EDITOR},
         {FCONTROL | FVIRTKEY, 'R', IDM_REBUILD},
         {FCONTROL | FVIRTKEY, 'I', IDM_SHOW_ANALYSIS},
+        {FCONTROL | FVIRTKEY, 'G', IDM_COVERAGE_CHART},
+        {FCONTROL | FSHIFT | FVIRTKEY, 'A', IDM_ADD_SELECTION},
+        {FCONTROL | FSHIFT | FVIRTKEY, VK_DELETE, IDM_REMOVE_RANGE},
+        {FCONTROL | FSHIFT | FVIRTKEY, 'F', IDM_FIT_RANGE},
+        {FALT | FVIRTKEY, '1', IDM_TIER_1},
+        {FALT | FVIRTKEY, '2', IDM_TIER_1 + 1},
+        {FALT | FVIRTKEY, '3', IDM_TIER_1 + 2},
+        {FALT | FVIRTKEY, '4', IDM_TIER_1 + 3},
+        {FALT | FVIRTKEY, '5', IDM_TIER_1 + 4},
+        {FALT | FVIRTKEY, '0', IDM_TIER_NONE},
     };
     accel_ = CreateAcceleratorTableW(keys, ARRAYSIZE(keys));
 
@@ -197,6 +246,7 @@ void MainWindow::createChildren() {
                                 TVS_SHOWSELALWAYS | TVS_INFOTIP,
                             0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_TREE), instance_, nullptr);
     TreeView_SetExtendedStyle(tree_, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
+    SetWindowSubclass(tree_, treeKeyProc, 1, reinterpret_cast<DWORD_PTR>(this));
     prevButton_ = CreateWindowExW(0, WC_BUTTONW, L"▲  Previous", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0,
                                   hwnd_, reinterpret_cast<HMENU>(IDC_PREV_BUTTON), instance_, nullptr);
     nextButton_ = CreateWindowExW(0, WC_BUTTONW, L"▼  Next", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0,
@@ -267,11 +317,15 @@ void MainWindow::setupEditor() {
     sci(SCI_SETMODEVENTMASK, SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT);
     sci(SCI_SETYCARETPOLICY, CARET_SLOP | CARET_STRICT | CARET_EVEN, 4);
 
-    sci(SCI_INDICSETSTYLE, kIndicTopic, INDIC_STRAIGHTBOX);
-    sci(SCI_INDICSETFLAGS, kIndicTopic, SC_INDICFLAG_VALUEFORE);
-    sci(SCI_INDICSETALPHA, kIndicTopic, 90);
-    sci(SCI_INDICSETOUTLINEALPHA, kIndicTopic, 0);
-    sci(SCI_INDICSETUNDER, kIndicTopic, 1);
+    // One highlight indicator per tier, so less load-bearing passages show lighter.
+    for (int tier = 0; tier <= pe::kTierCount; ++tier) {
+        const int indic = indicForTier(tier);
+        sci(SCI_INDICSETSTYLE, indic, INDIC_STRAIGHTBOX);
+        sci(SCI_INDICSETFLAGS, indic, SC_INDICFLAG_VALUEFORE);
+        sci(SCI_INDICSETALPHA, indic, kTierAlpha[tier]);
+        sci(SCI_INDICSETOUTLINEALPHA, indic, 0);
+        sci(SCI_INDICSETUNDER, indic, 1);
+    }
 
     sci(SCI_INDICSETSTYLE, kIndicCurrent, INDIC_ROUNDBOX);
     sci(SCI_INDICSETFLAGS, kIndicCurrent, SC_INDICFLAG_VALUEFORE);
@@ -469,8 +523,31 @@ const pe::Topic* MainWindow::topicOf(const NodeRef& node) const {
     return node.sub < 0 ? &t : &t.subtopics[node.sub];
 }
 
-std::wstring MainWindow::nodeLabel(const NodeRef& node) const {
-    if (node.topic == kGapsNode) return L"Unindexed text (" + std::to_wstring(gaps_.size()) + L")";
+std::vector<pe::TierSpan> MainWindow::nodeSpans(const NodeRef& node) const {
+    std::vector<pe::TierSpan> spans;
+    if (node.topic == kGapsNode) {
+        for (const pe::Gap& g : gaps_) spans.push_back({g.start, g.end, 0});
+        return spans;
+    }
+    const pe::Topic* t = topicOf(node);
+    if (!t) return spans;
+    auto add = [&](const pe::Topic& topic) {
+        for (const pe::Range& r : topic.ranges)
+            if (r.status != pe::AnchorStatus::Orphaned) spans.push_back({r.start, r.end, r.tier});
+    };
+    add(*t);
+    if (node.sub < 0)
+        for (const pe::Topic& s : t->subtopics) add(s);
+    return spans;
+}
+
+std::wstring MainWindow::nodeLabel(const NodeRef& node, const std::string& doc) const {
+    // Share of the document's characters this node covers, overlaps counted once.
+    const auto cov = pe::coverageByTier(doc, nodeSpans(node));
+    size_t covered = 0;
+    for (size_t c : cov) covered += c;
+    const std::wstring share = L"  · " + percent(covered, pe::countChars(doc));
+    if (node.topic == kGapsNode) return L"Unindexed text (" + std::to_wstring(gaps_.size()) + L")" + share;
     const pe::Topic* t = topicOf(node);
     int live = 0, lost = 0, review = 0;
     auto count = [&](const pe::Topic& topic) {
@@ -486,7 +563,7 @@ std::wstring MainWindow::nodeLabel(const NodeRef& node) const {
     count(*t);
     if (node.sub < 0)
         for (const pe::Topic& s : t->subtopics) count(s);
-    std::wstring label = widen(t->name) + L"  (" + std::to_wstring(live) + L")";
+    std::wstring label = widen(t->name) + L"  (" + std::to_wstring(live) + L")" + share;
     if (review) label += L"  • " + std::to_wstring(review) + L" to verify";
     if (lost) label += L"  • " + std::to_wstring(lost) + L" lost";
     return label;
@@ -521,9 +598,10 @@ void MainWindow::buildTree() {
         DeleteObject(bmp);
         return i;
     };
+    const std::string doc = documentText();
     auto insert = [&](HTREEITEM parent, const NodeRef& node, COLORREF color) {
         nodes_.push_back(node);
-        const std::wstring label = nodeLabel(node);
+        const std::wstring label = nodeLabel(node, doc);
         TVINSERTSTRUCTW is{};
         is.hParent = parent;
         is.hInsertAfter = TVI_LAST;
@@ -554,8 +632,9 @@ void MainWindow::buildTree() {
 }
 
 void MainWindow::relabelTree() {
+    const std::string doc = documentText();
     for (size_t i = 0; i < items_.size(); ++i) {
-        const std::wstring label = nodeLabel(nodes_[i]);
+        const std::wstring label = nodeLabel(nodes_[i], doc);
         TVITEMW item{};
         item.mask = TVIF_TEXT;
         item.hItem = items_[i];
@@ -579,7 +658,7 @@ void MainWindow::selectNode(const NodeRef& node) {
 void MainWindow::collectHits() {
     hits_.clear();
     if (selected_.topic == kGapsNode) {
-        for (const pe::Gap& g : gaps_) hits_.push_back({g.start, g.end, kGapColor, nullptr});
+        for (const pe::Gap& g : gaps_) hits_.push_back({g.start, g.end, kGapColor, nullptr, 0});
         return;
     }
     const pe::Topic* t = topicOf(selected_);
@@ -587,7 +666,7 @@ void MainWindow::collectHits() {
     auto add = [&](const pe::Topic& topic) {
         const COLORREF color = parseColor(topic.color, kGapColor);
         for (const pe::Range& r : topic.ranges)
-            if (r.status != pe::AnchorStatus::Orphaned) hits_.push_back({r.start, r.end, color, &r});
+            if (r.status != pe::AnchorStatus::Orphaned) hits_.push_back({r.start, r.end, color, &r, r.tier});
     };
     add(*t);
     if (selected_.sub < 0)
@@ -602,15 +681,19 @@ void MainWindow::collectHits() {
 
 void MainWindow::applyIndicators() {
     const sptr_t length = sci(SCI_GETLENGTH);
-    for (int indic : {kIndicTopic, kIndicCurrent, kIndicReview}) {
+    for (int indic : {kIndicCurrent, kIndicReview}) {
         sci(SCI_SETINDICATORCURRENT, indic);
+        sci(SCI_INDICATORCLEARRANGE, 0, length);
+    }
+    for (int tier = 0; tier <= pe::kTierCount; ++tier) {
+        sci(SCI_SETINDICATORCURRENT, indicForTier(tier));
         sci(SCI_INDICATORCLEARRANGE, 0, length);
     }
     for (int i = 0; i < static_cast<int>(hits_.size()); ++i) {
         const Hit& h = hits_[i];
         const sptr_t end = std::min<sptr_t>(static_cast<sptr_t>(h.end), length);
         const sptr_t start = std::min<sptr_t>(static_cast<sptr_t>(h.start), end);
-        sci(SCI_SETINDICATORCURRENT, kIndicTopic);
+        sci(SCI_SETINDICATORCURRENT, indicForTier(h.tier));
         sci(SCI_SETINDICATORVALUE, SC_INDICVALUEBIT | h.color);
         sci(SCI_INDICATORFILLRANGE, start, end - start);
         if (i == current_) {
@@ -815,6 +898,138 @@ void MainWindow::selectTreeNode(int topic, int sub) {
         }
 }
 
+// ---- Editing the index by hand ------------------------------------------------
+
+pe::Range* MainWindow::currentRange() {
+    if (current_ < 0 || current_ >= static_cast<int>(hits_.size()) || !hits_[current_].range) return nullptr;
+    return const_cast<pe::Range*>(hits_[current_].range);  // hits point into index_, which this owns
+}
+
+void MainWindow::indexChangedByHand(const std::wstring& what) {
+    writeIndexFile();
+    refresh();
+    SendMessageW(status_, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>(what.c_str()));
+}
+
+void MainWindow::addSelectionToTopic() {
+    if (!hasIndex_ || selected_.topic < 0) {
+        MessageBoxW(hwnd_, L"Select a topic or subtopic in the list first, then the passage in the document.",
+                    kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const sptr_t a = sci(SCI_GETSELECTIONSTART), b = sci(SCI_GETSELECTIONEND);
+    if (a == b) {
+        MessageBoxW(hwnd_, L"Select the passage in the document first.", kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const std::string doc = documentText();
+    pe::Range r;
+    r.start = static_cast<size_t>(a);
+    r.end = static_cast<size_t>(b);
+    r.exact = doc.substr(r.start, r.end - r.start);
+    r.prefix = pe::contextBefore(doc, r.start);
+    r.suffix = pe::contextAfter(doc, r.end);
+    r.touched = true;
+    r.tier = 3;  // "direct" until the user says otherwise (Alt+1..5)
+    hits_.clear();  // adding to the vector may move the ranges they point to
+    current_ = -1;
+    pe::Topic& topic = nodeTopic(selected_.topic, selected_.sub);
+    topic.ranges.push_back(r);
+    indexChangedByHand(L"Added a passage to " + widen(topic.name));
+    for (int i = 0; i < static_cast<int>(hits_.size()); ++i)
+        if (hits_[i].range == &topic.ranges.back()) gotoHit(i);
+}
+
+void MainWindow::removeCurrentRange() {
+    pe::Range* target = currentRange();
+    if (!target) {
+        MessageBoxW(hwnd_, L"Go to the passage with Previous/Next first; the one the counter is on is removed.",
+                    kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    for (pe::Topic& t : index_.topics)
+        for (int j = -1; j < static_cast<int>(t.subtopics.size()); ++j) {
+            auto& ranges = j < 0 ? t.ranges : t.subtopics[j].ranges;
+            for (size_t k = 0; k < ranges.size(); ++k)
+                if (&ranges[k] == target) {
+                    const std::wstring name = widen(j < 0 ? t.name : t.subtopics[j].name);
+                    const int was = current_;
+                    hits_.clear();
+                    current_ = -1;
+                    ranges.erase(ranges.begin() + static_cast<std::ptrdiff_t>(k));
+                    indexChangedByHand(L"Removed a passage from " + name);
+                    if (!hits_.empty()) gotoHit(std::min(was, static_cast<int>(hits_.size()) - 1));
+                    return;
+                }
+        }
+}
+
+void MainWindow::fitCurrentRange() {
+    pe::Range* r = currentRange();
+    const sptr_t a = sci(SCI_GETSELECTIONSTART), b = sci(SCI_GETSELECTIONEND);
+    if (!r || a == b) {
+        MessageBoxW(hwnd_, L"Go to the passage with Previous/Next, then select the text it should cover.", kAppName,
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const std::string doc = documentText();
+    r->start = static_cast<size_t>(a);
+    r->end = static_cast<size_t>(b);
+    r->exact = doc.substr(r->start, r->end - r->start);
+    r->prefix = pe::contextBefore(doc, r->start);
+    r->suffix = pe::contextAfter(doc, r->end);
+    r->status = pe::AnchorStatus::Exact;  // placed by hand, so nothing left to verify
+    r->touched = true;
+    indexChangedByHand(L"Fitted the passage to the selection");
+}
+
+void MainWindow::setCurrentTier(int tier) {
+    pe::Range* r = currentRange();
+    if (!r) {
+        MessageBoxW(hwnd_, L"Go to the passage with Previous/Next first.", kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    r->tier = tier;
+    for (Hit& h : hits_)
+        if (h.range == r) h.tier = tier;
+    indexChangedByHand(tier ? L"Tier set to " + std::to_wstring(tier) + L": " + widen(pe::tierName(tier))
+                            : L"Tier cleared");
+}
+
+LRESULT CALLBACK MainWindow::treeKeyProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
+    // In the topic list, Left/Right step through the selected topic's passages
+    // (Up/Down already move between topics and subtopics).
+    if (msg == WM_KEYDOWN && (wp == VK_LEFT || wp == VK_RIGHT)) {
+        reinterpret_cast<MainWindow*>(data)->next(wp == VK_RIGHT ? +1 : -1);
+        return 0;
+    }
+    if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, treeKeyProc, 1);
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+
+void MainWindow::showCoverageChart() {
+    if (!hasIndex_) return;
+    const std::string doc = documentText();
+    std::vector<CoverageRow> rows;
+    for (int i = 0; i < static_cast<int>(index_.topics.size()); ++i) {
+        CoverageRow row;
+        row.name = widen(index_.topics[i].name);
+        row.color = parseColor(index_.topics[i].color, kGapColor);
+        row.chars = pe::coverageByTier(doc, nodeSpans({i, -1}));
+        rows.push_back(row);
+    }
+    std::stable_sort(rows.begin(), rows.end(), [](const CoverageRow& a, const CoverageRow& b) {
+        return a.total() > b.total();
+    });
+    CoverageRow gaps;
+    gaps.name = L"Unindexed text";
+    gaps.color = kGapColor;
+    gaps.chars = pe::coverageByTier(doc, nodeSpans({kGapsNode, -1}));
+    rows.push_back(gaps);
+    CoverageChart chart(std::move(rows), pe::countChars(doc));
+    chart.show(hwnd_);
+}
+
 void MainWindow::showAnalysis() {
     if (!hasIndex_ || selected_.topic < 0) return;
     const pe::Topic& t = index_.topics[selected_.topic];
@@ -867,6 +1082,9 @@ void MainWindow::updateNavLabel() {
         } else {
             text += (current_ >= 0 ? std::to_wstring(current_ + 1) : L"–") + L" of " +
                     std::to_wstring(hits_.size());
+            if (current_ >= 0 && hits_[current_].range && hits_[current_].range->tier)
+                text += L"   tier " + std::to_wstring(hits_[current_].range->tier) + L": " +
+                        widen(pe::tierName(hits_[current_].range->tier));
             if (current_ >= 0 && hits_[current_].range && hits_[current_].range->status != pe::AnchorStatus::Exact)
                 text += L"   [" + widen(pe::toString(hits_[current_].range->status)) + L"]";
         }
@@ -925,7 +1143,8 @@ void MainWindow::paintOverview(HDC dc, const RECT& rc) {
         const sptr_t a = sci(SCI_VISIBLEFROMDOCLINE, sci(SCI_LINEFROMPOSITION, h.start));
         const sptr_t b = sci(SCI_VISIBLEFROMDOCLINE, sci(SCI_LINEFROMPOSITION, h.end) + 1);
         RECT r{rc.left + 2, yOf(a), rc.right - 2, std::max(yOf(b), yOf(a) + scale(3))};
-        HBRUSH fill = CreateSolidBrush(i == current_ ? darken(h.color, 0.55) : h.color);
+        HBRUSH fill = CreateSolidBrush(i == current_ ? darken(h.color, 0.55)
+                                                     : fade(h.color, kTierStrength[h.tier], RGB(0xF3, 0xF3, 0xF3)));
         FillRect(dc, &r, fill);
         DeleteObject(fill);
     }
@@ -1518,6 +1737,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
         }
 
         case WM_COMMAND:
+            if (LOWORD(wp) >= IDM_TIER_1 && LOWORD(wp) < IDM_TIER_1 + pe::kTierCount) {
+                setCurrentTier(LOWORD(wp) - IDM_TIER_1 + 1);
+                return 0;
+            }
             switch (LOWORD(wp)) {
                 case IDM_OPEN: openDialog(); return 0;
                 case IDM_SAVE: save(); return 0;
@@ -1536,6 +1759,11 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_SETTINGS: openSettings(); return 0;
                 case IDC_LOG_CLOSE: showLog(false); return 0;
                 case IDM_SHOW_ANALYSIS: showAnalysis(); return 0;
+                case IDM_COVERAGE_CHART: showCoverageChart(); return 0;
+                case IDM_ADD_SELECTION: addSelectionToTopic(); return 0;
+                case IDM_REMOVE_RANGE: removeCurrentRange(); return 0;
+                case IDM_FIT_RANGE: fitCurrentRange(); return 0;
+                case IDM_TIER_NONE: setCurrentTier(0); return 0;
                 case IDC_REVIEW_PLACE: placeLost(); return 0;
                 case IDC_REVIEW_DISCARD: discardLost(); return 0;
             }
@@ -1549,6 +1777,17 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
             enable(IDM_CANCEL_INDEXING, jobRunning_);
             enable(IDM_SHOW_ANALYSIS, hasIndex_ && selected_.topic >= 0 &&
                                           !index_.topics[selected_.topic].analysis.empty());
+            enable(IDM_COVERAGE_CHART, hasIndex_);
+            enable(IDM_ADD_SELECTION, hasIndex_ && selected_.topic >= 0);
+            const bool onPassage = current_ >= 0 && current_ < static_cast<int>(hits_.size()) && hits_[current_].range;
+            enable(IDM_REMOVE_RANGE, onPassage);
+            enable(IDM_FIT_RANGE, onPassage);
+            for (int t = 0; t <= pe::kTierCount; ++t) {
+                const UINT id = t ? IDM_TIER_1 + t - 1 : IDM_TIER_NONE;
+                enable(id, onPassage);
+                CheckMenuItem(menu, id,
+                              MF_BYCOMMAND | (onPassage && hits_[current_].range->tier == t ? MF_CHECKED : MF_UNCHECKED));
+            }
             return 0;
         }
 

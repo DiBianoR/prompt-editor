@@ -8,6 +8,7 @@ or two changed, and boundaries that cut a word in half.
     {"lines": "12-14"}                       whole lines (list markers left out)
     {"quote": "text", "line": 12}            a passage; "line" is an optional hint
     {"from": "start", "to": "end", "line": 12}
+    any form may add "tier": 1-5 (how load-bearing the passage is for its topic)
 
 Each resolved span carries a status: "exact", "normalized" or "fuzzy"
 (approximate: verify it), plus "ambiguous" when the text occurs more than
@@ -240,8 +241,21 @@ def _parse_lines(value, doc):
     return a, b
 
 
+def tier_of(item):
+    """The range's "tier", 1 (core) to 5 (adjacent); 0 when missing or invalid."""
+    t = item.get("tier") if isinstance(item, dict) else None
+    if isinstance(t, str) and t.isdigit():
+        t = int(t)
+    return t if isinstance(t, int) and 1 <= t <= 5 else 0
+
+
 def resolve_range(doc, item):
-    """Resolves one range item. Returns (start, end, status) as character offsets."""
+    """Resolves one range item. Returns (start, end, status, tier); offsets are characters."""
+    start, end, status = _resolve_untiered(doc, item)
+    return start, end, status, tier_of(item)
+
+
+def _resolve_untiered(doc, item):
     if not isinstance(item, dict):
         raise ResolveError(f"not a range object: {item!r}")
     hint = item.get("line")
@@ -266,7 +280,7 @@ def resolve_range(doc, item):
         literal = q in doc.text or normalize_key(q) in doc.norm.text
         if len(parts) >= 2 and not literal:
             # An abbreviated quote: treat its first and last parts as from/to.
-            return resolve_range(doc, {"from": parts[0], "to": parts[-1], "line": hint})
+            return _resolve_untiered(doc, {"from": parts[0], "to": parts[-1], "line": hint})
         start, end, status = find_text(doc, q, hint)
         start, end = _snap_words(doc, start, end)
         return start, end, status
@@ -285,13 +299,14 @@ def resolve_range(doc, item):
 
 
 def merge_spans(spans, text):
-    """Sorts spans and merges overlapping ones, or ones separated only by whitespace.
-    spans: list of (start, end, status)."""
+    """Sorts spans and merges overlapping ones, or ones separated only by whitespace;
+    a merged span keeps the most load-bearing (lowest) tier. spans: (start, end, status, tier)."""
     out = []
-    for s, e, st in sorted(spans):
+    for s, e, st, tier in sorted(spans):
         if out and (s <= out[-1][1] or not text[out[-1][1]:s].strip()):
-            ps, pe, pst = out[-1]
-            out[-1] = (ps, max(pe, e), worse(pst, st))
+            ps, pe, pst, ptier = out[-1]
+            best = min(t for t in (ptier, tier) if t) if (ptier or tier) else 0
+            out[-1] = (ps, max(pe, e), worse(pst, st), best)
         else:
-            out.append((s, e, st))
+            out.append((s, e, st, tier))
     return out
