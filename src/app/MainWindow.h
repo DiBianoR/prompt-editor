@@ -7,8 +7,10 @@
 #include <atomic>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include "Scintilla.h"
@@ -93,6 +95,7 @@ private:
 
     void updateTitle();
     void updateNavLabel();
+    void drawNavLabel(const DRAWITEMSTRUCT& di);
     void updateStatus();
 
     void paintOverview(HDC dc, const RECT& rc);
@@ -152,6 +155,10 @@ private:
     int treeWidth_ = 300;  // at 96 DPI
     bool draggingSplitter_ = false;
     bool rebuildingTree_ = false;
+    std::set<std::string> expanded_;  // names of the topics open in the tree
+    // The line above the editor: text, the current passage's tier (on a chip), more text.
+    std::tuple<std::wstring, std::wstring, std::wstring> navText_;
+    COLORREF navTierColor_ = 0;
 
     std::filesystem::path docPath_;
     std::filesystem::path indexPath_;

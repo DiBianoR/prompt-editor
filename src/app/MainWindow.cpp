@@ -253,8 +253,7 @@ void MainWindow::createChildren() {
                                   hwnd_, reinterpret_cast<HMENU>(IDC_PREV_BUTTON), instance_, nullptr);
     nextButton_ = CreateWindowExW(0, WC_BUTTONW, L"▼  Next", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0, 0,
                                   hwnd_, reinterpret_cast<HMENU>(IDC_NEXT_BUTTON), instance_, nullptr);
-    navLabel_ = CreateWindowExW(0, WC_STATICW, nullptr, WS_CHILD | WS_VISIBLE | SS_LEFTNOWORDWRAP | SS_CENTERIMAGE |
-                                    SS_ENDELLIPSIS | SS_NOPREFIX,
+    navLabel_ = CreateWindowExW(0, WC_STATICW, nullptr, WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,  // see drawNavLabel
                                 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_NAV_LABEL), instance_, nullptr);
     editor_ = CreateWindowExW(0, L"Scintilla", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN, 0, 0,
                               0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_EDITOR), instance_, nullptr);
@@ -621,7 +620,7 @@ void MainWindow::buildTree() {
         HTREEITEM item = insert(TVI_ROOT, {i, -1}, parseColor(t.color, kGapColor));
         for (int j = 0; j < static_cast<int>(t.subtopics.size()); ++j)
             insert(item, {i, j}, parseColor(t.subtopics[j].color, kGapColor));
-        TreeView_Expand(tree_, item, TVE_EXPAND);
+        if (expanded_.count(t.name)) TreeView_Expand(tree_, item, TVE_EXPAND);
     }
     if (hasIndex_) insert(TVI_ROOT, {kGapsNode, -1}, kGapColor);
     DeleteDC(mem);
@@ -1114,7 +1113,8 @@ void MainWindow::updateTitle() {
 }
 
 void MainWindow::updateNavLabel() {
-    std::wstring text;
+    std::wstring text, tierText, after;
+    COLORREF tierColor = 0;
     if (docPath_.empty()) {
         text = L"Open a prompt with Ctrl+O, or drop a file here.";
     } else if (!hasIndex_) {
@@ -1137,16 +1137,61 @@ void MainWindow::updateNavLabel() {
             text += L"no matches";
         } else {
             text += (current_ >= 0 ? std::to_wstring(current_ + 1) : L"–") + L" of " +
-                    std::to_wstring(hits_.size());
-            if (current_ >= 0 && hits_[current_].range && hits_[current_].range->tier)
-                text += L"   tier " + std::to_wstring(hits_[current_].range->tier) + L": " +
-                        widen(pe::tierName(hits_[current_].range->tier));
-            if (current_ >= 0 && hits_[current_].range && hits_[current_].range->status != pe::AnchorStatus::Exact)
-                text += L"   [" + widen(pe::toString(hits_[current_].range->status)) + L"]";
+                    std::to_wstring(hits_.size()) + L"   ";
+            const pe::Range* r = current_ >= 0 ? hits_[current_].range : nullptr;
+            if (r && r->tier) {
+                // The tier is shown on a chip shaded like the passage's highlight.
+                const int tier = pe::clampTier(r->tier);
+                tierText = L"tier " + std::to_wstring(tier) + L": " + widen(pe::tierName(tier));
+                const COLORREF c = hits_[current_].color;
+                auto mix = [&](int v) { return (v * kTierAlpha[tier] + 255 * (255 - kTierAlpha[tier])) / 255; };
+                tierColor = RGB(mix(GetRValue(c)), mix(GetGValue(c)), mix(GetBValue(c)));
+            }
+            if (r && r->status != pe::AnchorStatus::Exact)
+                after += L"   [" + widen(pe::toString(r->status)) + L"]";
         }
-        if (!note.empty()) text += L"     Note: " + widen(note);
+        if (!note.empty()) after += L"     Note: " + widen(note);
     }
-    SetWindowTextW(navLabel_, text.c_str());
+    navText_ = {text, tierText, after};
+    navTierColor_ = tierColor;
+    SetWindowTextW(navLabel_, (text + tierText + after).c_str());  // for screen readers; also repaints
+}
+
+void MainWindow::drawNavLabel(const DRAWITEMSTRUCT& di) {
+    HDC dc = di.hDC;
+    RECT rc = di.rcItem;
+    FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+    HGDIOBJ oldFont = SelectObject(dc, uiFont_);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+    const UINT flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
+    auto width = [&](const std::wstring& s) {
+        RECT m{0, 0, 0, 0};
+        DrawTextW(dc, s.c_str(), static_cast<int>(s.size()), &m, flags | DT_CALCRECT);
+        return static_cast<int>(m.right);
+    };
+    RECT part = rc;
+    const auto& [before, tier, after] = navText_;
+    DrawTextW(dc, before.c_str(), static_cast<int>(before.size()), &part, flags | DT_END_ELLIPSIS);
+    part.left += width(before);
+    if (!tier.empty() && part.left < part.right) {
+        const int pad = scale(5);
+        RECT chip{part.left, rc.top + scale(2), std::min<int>(part.right, part.left + width(tier) + 2 * pad),
+                  rc.bottom - scale(2)};
+        HBRUSH fill = CreateSolidBrush(navTierColor_);
+        HGDIOBJ oldBrush = SelectObject(dc, fill);
+        HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+        RoundRect(dc, chip.left, chip.top, chip.right + 1, chip.bottom + 1, scale(6), scale(6));
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(fill);
+        RECT t{chip.left + pad, chip.top, chip.right, chip.bottom};
+        DrawTextW(dc, tier.c_str(), static_cast<int>(tier.size()), &t, flags | DT_END_ELLIPSIS);
+        part.left = chip.right;
+    }
+    if (part.left < part.right)
+        DrawTextW(dc, after.c_str(), static_cast<int>(after.size()), &part, flags | DT_END_ELLIPSIS);
+    SelectObject(dc, oldFont);
 }
 
 void MainWindow::updateStatus() {
@@ -1938,9 +1983,27 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 auto* tip = reinterpret_cast<NMTVGETINFOTIPW*>(lp);
                 const auto i = static_cast<size_t>(tip->lParam);
                 const pe::Topic* t = i < nodes_.size() ? topicOf(nodes_[i]) : nullptr;
+                // Only notes; without this the tree shows the item's own label as its tip.
+                if (tip->cchTextMax > 0) tip->pszText[0] = L'\0';
                 if (t && !t->note.empty()) lstrcpynW(tip->pszText, widen(t->note).c_str(), tip->cchTextMax);
+            } else if (hdr->hwndFrom == tree_ && hdr->code == TVN_ITEMEXPANDEDW && !rebuildingTree_) {
+                // Topics start collapsed; the ones the user opens stay open across rebuilds.
+                const auto* tv = reinterpret_cast<const NMTREEVIEWW*>(lp);
+                const auto i = static_cast<size_t>(tv->itemNew.lParam);
+                if (i < nodes_.size() && nodes_[i].topic >= 0 && nodes_[i].sub < 0) {
+                    const std::string& name = index_.topics[nodes_[i].topic].name;
+                    if (tv->action == TVE_EXPAND) expanded_.insert(name);
+                    else expanded_.erase(name);
+                }
             }
             break;
+        }
+
+        case WM_DRAWITEM: {
+            const auto* di = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
+            if (di->hwndItem != navLabel_) break;
+            drawNavLabel(*di);
+            return TRUE;
         }
 
         case WM_APP_REFRESH:
