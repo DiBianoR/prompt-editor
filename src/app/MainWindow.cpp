@@ -7,8 +7,11 @@
 #include <algorithm>
 #include <ctime>
 #include <fstream>
+#include <map>
 #include <set>
 #include <sstream>
+
+#include <nlohmann/json.hpp>
 
 #include "Dialogs.h"
 #include "LlmClient.h"
@@ -984,10 +987,98 @@ LRESULT CALLBACK MainWindow::overviewProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM
 
 // ---- LLM indexing --------------------------------------------------------
 
+// progress.json in a run's folder: the topics asked for and every topic
+// finished so far, saved as each one completes. A run that stops early (cancel,
+// error, closing the app, a crash) can be resumed from it. Each finished topic
+// is stored as a one-topic index with the hash of the text the model saw, so it
+// can be anchored to whatever the document looks like when it is applied.
+struct RunProgress {
+    std::filesystem::path folder;
+    std::string document;  // absolute path of the prompt, UTF-8
+    std::string state;     // running, interrupted, done, abandoned
+    bool replaceMode = false;  // rebuilding one topic, keeping the rest
+    std::vector<pe::TopicRequest> topics;
+    nlohmann::json completed = nlohmann::json::array();  // [{"name", "index"}]
+
+    std::filesystem::path file() const { return folder / L"progress.json"; }
+
+    std::set<std::string> doneNames() const {
+        std::set<std::string> names;
+        for (const auto& c : completed) names.insert(c.value("name", ""));
+        return names;
+    }
+
+    std::vector<pe::TopicRequest> remaining() const {
+        const std::set<std::string> done = doneNames();
+        std::vector<pe::TopicRequest> out;
+        for (const pe::TopicRequest& t : topics)
+            if (!done.count(t.name)) out.push_back(t);
+        return out;
+    }
+
+    bool save() const {
+        nlohmann::json j = {{"version", 1}, {"document", document}, {"state", state},
+                            {"replaceMode", replaceMode}, {"topics", nlohmann::json::array()},
+                            {"completed", completed}};
+        for (const pe::TopicRequest& t : topics) j["topics"].push_back({{"name", t.name}, {"hint", t.hint}});
+        std::error_code ec;
+        std::filesystem::create_directories(folder, ec);
+        return writeFileAtomic(file(), j.dump(1));
+    }
+
+    static bool load(const std::filesystem::path& folder, RunProgress& out) {
+        std::string text;
+        if (!readFile(folder / L"progress.json", text)) return false;
+        const nlohmann::json j = nlohmann::json::parse(text, nullptr, false);
+        if (!j.is_object()) return false;
+        out = {};
+        out.folder = folder;
+        out.document = j.value("document", "");
+        out.state = j.value("state", "");
+        out.replaceMode = j.value("replaceMode", false);
+        if (auto t = j.find("topics"); t != j.end() && t->is_array())
+            for (const auto& x : *t) out.topics.push_back({x.value("name", ""), x.value("hint", "")});
+        if (auto c = j.find("completed"); c != j.end() && c->is_array()) out.completed = *c;
+        return true;
+    }
+};
+
+namespace {
+
+bool samePath(const std::filesystem::path& a, const std::filesystem::path& b) {
+    std::error_code ec;
+    return std::filesystem::equivalent(a, b, ec) || _wcsicmp(a.c_str(), b.c_str()) == 0;
+}
+
+// The newest run for this document that stopped with topics left to do.
+bool findInterruptedRun(const std::filesystem::path& doc, RunProgress& out) {
+    std::error_code ec;
+    std::vector<std::filesystem::path> folders;
+    for (const auto& entry : std::filesystem::directory_iterator(runsFolder(), ec))
+        if (entry.is_directory()) folders.push_back(entry.path());
+    std::sort(folders.rbegin(), folders.rend());  // names start with a timestamp
+    for (const auto& folder : folders) {
+        RunProgress p;
+        if (!RunProgress::load(folder, p)) continue;
+        if (!samePath(std::filesystem::u8path(p.document), doc)) continue;
+        if (p.state == "done" || p.state == "abandoned") return false;  // the latest run is settled
+        if (p.remaining().empty()) continue;
+        out = std::move(p);
+        return true;
+    }
+    return false;
+}
+
+std::wstring runStartedAt(const std::filesystem::path& folder) {
+    const std::wstring n = folder.filename().wstring();  // 20261025-164439-name
+    if (n.size() < 15) return n;
+    return n.substr(0, 4) + L"-" + n.substr(4, 2) + L"-" + n.substr(6, 2) + L" " + n.substr(9, 2) + L":" + n.substr(11, 2);
+}
+
+}  // namespace
+
 struct MainWindow::JobResult {
     Job job;
-    std::string snapshot;  // the document text the model saw
-    std::vector<pe::Topic> topics;
     std::vector<pe::TopicRequest> proposals;
     std::filesystem::path folder;
     std::string model;
@@ -1003,8 +1094,37 @@ void MainWindow::openSettings() {
     if (!settings_.save()) showError(hwnd_, L"The settings could not be saved to " + AppSettings::folder().wstring());
 }
 
+// If a run for this document stopped early, offers to finish it. Returns true
+// when the user chose to resume (the job is started) or to cancel altogether.
+// Choosing to start over fills `topicsText` with that run's topic list.
+bool MainWindow::offerResume(std::wstring& topicsText) {
+    RunProgress run;
+    if (!findInterruptedRun(docPath_, run)) return false;
+    const size_t done = run.completed.size(), total = run.topics.size(), left = run.remaining().size();
+    const std::wstring text = L"An indexing run for this document stopped after " + std::to_wstring(done) + L" of " +
+                              std::to_wstring(total) + L" topics (started " + runStartedAt(run.folder) + L").\n\n" +
+                              L"Yes: resume, indexing the " + std::to_wstring(left) + L" remaining topics.\n" +
+                              L"No: start a new run instead.";
+    const int answer = MessageBoxW(hwnd_, text.c_str(), kAppName, MB_YESNOCANCEL | MB_ICONQUESTION);
+    if (answer == IDCANCEL) return true;
+    if (answer == IDNO) {
+        run.state = "abandoned";
+        run.save();
+        for (const pe::TopicRequest& t : run.topics)
+            topicsText += widen(t.name) + (t.hint.empty() ? L"" : L" | " + widen(t.hint)) + L"\n";
+        return false;
+    }
+    Job job;
+    job.topics = run.remaining();
+    job.replaceMode = run.replaceMode;
+    job.resumeFolder = run.folder;
+    startJob(std::move(job));
+    return true;
+}
+
 void MainWindow::rebuildIndexDialog(std::wstring topicsText) {
     if (docPath_.empty() || jobRunning_) return;
+    if (topicsText.empty() && offerResume(topicsText)) return;
     if (topicsText.empty() && hasIndex_)
         for (const pe::Topic& t : index_.topics) topicsText += widen(t.name) + L"\n";
     TopicsDialog dlg(topicsText);
@@ -1024,7 +1144,7 @@ void MainWindow::rebuildIndexDialog(std::wstring topicsText) {
 void MainWindow::rebuildSelectedTopic() {
     if (jobRunning_ || !hasIndex_ || selected_.topic < 0) return;
     Job job;
-    job.replaceTopic = selected_.topic;  // a subtopic rebuilds its whole topic
+    job.replaceMode = true;  // a subtopic rebuilds its whole topic
     job.topics.push_back({index_.topics[selected_.topic].name, ""});
     startJob(std::move(job));
 }
@@ -1038,14 +1158,27 @@ void MainWindow::startJob(Job job) {
         if (!settings_.serverConfigured()) return;
     }
 
-    char stamp[32];
-    const std::time_t now = std::time(nullptr);
-    std::tm tm{};
-    localtime_s(&tm, &now);
-    std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
     auto result = std::make_unique<JobResult>();
-    result->snapshot = documentText();
-    result->folder = runsFolder() / (widen(stamp) + L"-" + docPath_.stem().wstring());
+    RunProgress progress;
+    if (!job.resumeFolder.empty() && RunProgress::load(job.resumeFolder, progress)) {
+        result->folder = job.resumeFolder;  // keep adding to the interrupted run
+    } else {
+        char stamp[32];
+        const std::time_t now = std::time(nullptr);
+        std::tm tm{};
+        localtime_s(&tm, &now);
+        std::strftime(stamp, sizeof stamp, "%Y%m%d-%H%M%S", &tm);
+        result->folder = runsFolder() / (widen(stamp) + L"-" + docPath_.stem().wstring());
+        progress.folder = result->folder;
+        progress.document = std::filesystem::absolute(docPath_).u8string();
+        progress.replaceMode = job.replaceMode;
+        progress.topics = job.topics;
+    }
+    progress.state = "running";
+    if (job.kind == Job::Build && !progress.save()) {
+        showError(hwnd_, L"Could not write the run's progress file in " + result->folder.wstring());
+        return;
+    }
     result->model = settings_.model;
 
     client_ = std::make_shared<LlmClient>(settings_.baseUrl, settings_.model, settings_.apiKey);
@@ -1056,9 +1189,14 @@ void MainWindow::startJob(Job job) {
     showLog(true);
     SetWindowTextW(logTitle_, (L"Indexing with " + widen(settings_.model)).c_str());
     appendLog(L"Model " + widen(settings_.model) + L" at " + widen(settings_.baseUrl));
+    if (!job.resumeFolder.empty())
+        appendLog(L"Resuming: " + std::to_wstring(progress.completed.size()) + L" topics already done, " +
+                  std::to_wstring(job.topics.size()) + L" to go.");
     updateStatus();
 
     // The worker gets copies of everything it reads; only cancel_ is shared.
+    const std::string snapshot = documentText();
+    const std::string docName = narrow(docPath_.filename().wstring());
     const pe::Index previous = index_;
     const bool hasPrevious = hasIndex_;
     const pe::PromptSet prompts = settings_.prompts();
@@ -1067,7 +1205,8 @@ void MainWindow::startJob(Job job) {
     std::shared_ptr<LlmClient> client = client_;
     HWND hwnd = hwnd_;
     std::atomic<bool>* cancel = &cancel_;
-    worker_ = std::thread([result = result.release(), previous, hasPrevious, prompts, repairs, client, hwnd, cancel]() {
+    worker_ = std::thread([result = result.release(), progress, snapshot, docName, previous, hasPrevious, prompts,
+                           repairs, client, hwnd, cancel]() mutable {
         auto log = [hwnd](const std::string& line) {
             PostMessageW(hwnd, WM_APP_JOB_LOG, 0, reinterpret_cast<LPARAM>(new std::wstring(widen(line))));
         };
@@ -1081,22 +1220,34 @@ void MainWindow::startJob(Job job) {
             std::ofstream(p, std::ios::binary) << content;
         };
         try {
-            const pe::SourceDocument doc(result->snapshot);
+            const pe::SourceDocument doc(snapshot);
             const pe::Index* prev = hasPrevious ? &previous : nullptr;
             if (result->job.kind == Job::Discover) {
                 result->proposals = pe::discoverTopics(*client, doc, prompts, prev, hooks);
             } else {
+                // Ids already taken: the topics kept as they are, and topics finished earlier in this run.
                 std::set<std::string> used;
-                if (result->job.replaceTopic >= 0)
-                    for (int i = 0; i < static_cast<int>(previous.topics.size()); ++i)
-                        if (i != result->job.replaceTopic) {
-                            used.insert(previous.topics[i].id);
-                            for (const pe::Topic& s : previous.topics[i].subtopics) used.insert(s.id);
-                        }
+                for (const pe::Topic& t : previous.topics) {
+                    const bool rebuilt = std::any_of(progress.topics.begin(), progress.topics.end(),
+                                                     [&](const pe::TopicRequest& r) { return r.name == t.name; });
+                    if (progress.replaceMode && !rebuilt) {
+                        used.insert(t.id);
+                        for (const pe::Topic& s : t.subtopics) used.insert(s.id);
+                    }
+                }
                 const auto& topics = result->job.topics;
+                const size_t total = progress.topics.size();
                 for (size_t i = 0; i < topics.size(); ++i) {
-                    log("[" + std::to_string(i + 1) + "/" + std::to_string(topics.size()) + "] " + topics[i].name);
-                    const size_t palette = result->job.replaceTopic >= 0 ? result->job.replaceTopic : i;
+                    const size_t number = progress.completed.size() + 1;
+                    log("[" + std::to_string(number) + "/" + std::to_string(total) + "] " + topics[i].name);
+                    // Colors follow the topic's place in the list (or in the index, for one topic).
+                    size_t palette = 0;
+                    const auto& order = progress.replaceMode ? std::vector<pe::TopicRequest>() : progress.topics;
+                    for (size_t k = 0; k < order.size(); ++k)
+                        if (order[k].name == topics[i].name) palette = k;
+                    if (progress.replaceMode)
+                        for (size_t k = 0; k < previous.topics.size(); ++k)
+                            if (previous.topics[k].name == topics[i].name) palette = k;
                     try {
                         pe::TopicOutcome out = pe::indexTopic(*client, doc, topics[i], prompts, repairs, hooks);
                         size_t ranges = out.topic.spans.size(), lost = out.topic.lost.size();
@@ -1110,19 +1261,17 @@ void MainWindow::startJob(Job job) {
                         pe::Topic topic = pe::toIndexTopic(out.topic, prev, used, palette);
                         topic.analysis =
                             (result->folder / std::filesystem::u8path(out.analysisFile)).make_preferred().u8string();
-                        result->topics.push_back(std::move(topic));
+                        // Saved right away, with the text it refers to, so it survives anything that follows.
+                        const pe::Index chunk = pe::assembleIndex(docName, snapshot, {topic});
+                        progress.completed.push_back(
+                            {{"name", topics[i].name}, {"index", nlohmann::json::parse(pe::serializeIndex(chunk))}});
+                        progress.save();
                     } catch (const pe::Cancelled&) {
                         throw;
                     } catch (const std::exception& e) {
+                        // The index keeps what it already had for this topic.
                         ++result->failedTopics;
                         log(std::string("  FAILED: ") + e.what());
-                        // Keep what the index already had for this topic, if anything.
-                        if (prev)
-                            for (const pe::Topic& t : prev->topics)
-                                if (t.name == topics[i].name) {
-                                    result->topics.push_back(t);
-                                    log("  kept the previous ranges for this topic");
-                                }
                     }
                 }
             }
@@ -1149,21 +1298,16 @@ void MainWindow::onJobDone(JobResult* raw) {
     EnableWindow(logCancel_, FALSE);
     const int calls = client_ ? client_->calls() : 0;
     client_.reset();
-    SetWindowTextW(logTitle_, L"Indexing finished");
     updateStatus();
-    if (result->cancelled) {
-        appendLog(L"Cancelled. The index was not changed.");
-        SetWindowTextW(logTitle_, L"Indexing cancelled");
-        return;
-    }
-    if (!result->error.empty()) {
-        appendLog(L"Stopped: " + widen(result->error));
-        SetWindowTextW(logTitle_, L"Indexing failed");
-        return;
-    }
     const std::wstring transcripts = L"Transcripts: " + result->folder.wstring();
 
     if (result->job.kind == Job::Discover) {
+        if (result->cancelled || !result->error.empty()) {
+            appendLog(result->cancelled ? L"Cancelled." : L"Stopped: " + widen(result->error));
+            SetWindowTextW(logTitle_, result->cancelled ? L"Cancelled" : L"Proposing topics failed");
+            return;
+        }
+        SetWindowTextW(logTitle_, L"Topics proposed");
         std::wstring text = result->job.topicsText;
         std::set<std::string> have;
         for (const pe::TopicRequest& t : pe::parseTopicLines(narrow(text))) have.insert(t.name);
@@ -1179,27 +1323,18 @@ void MainWindow::onJobDone(JobResult* raw) {
         return;
     }
 
-    if (result->topics.empty()) {
-        appendLog(L"No topic could be indexed; the index was not changed. " + transcripts);
+    // Whatever finished is applied, however the run ended.
+    RunProgress progress;
+    if (!RunProgress::load(result->folder, progress)) {
+        appendLog(L"The run's progress file could not be read; the index was not changed.");
         return;
     }
-    // The model saw a snapshot; if the text changed meanwhile, anchor to the current text.
-    const std::string current = documentText();
-    pe::Index built = pe::assembleIndex(narrow(docPath_.filename().wstring()), result->snapshot, result->topics);
-    if (current != result->snapshot) pe::anchorIndex(built, current);
-    if (result->job.replaceTopic >= 0 && hasIndex_ && result->job.replaceTopic < static_cast<int>(index_.topics.size())) {
-        index_.topics[result->job.replaceTopic] = built.topics.front();
-    } else {
-        index_ = std::move(built);
-        hasIndex_ = true;
-    }
-    indexSource_ = L"Index built by " + widen(result->model);
-    writeIndexFile();
-    selected_ = {-1, -1};
-    hits_.clear();
-    current_ = -1;
-    buildTree();
-    refresh();
+    const size_t done = progress.completed.size(), total = progress.topics.size();
+    progress.state = progress.remaining().empty() ? "done" : "interrupted";
+    progress.save();
+    if (result->cancelled) appendLog(L"Cancelled.");
+    if (!result->error.empty()) appendLog(L"Stopped: " + widen(result->error));
+    if (done > 0) applyRun(progress);
 
     int ranges = 0, review = 0, lost = 0;
     index_.forEachRange([&](pe::Range& r) {
@@ -1210,11 +1345,70 @@ void MainWindow::onJobDone(JobResult* raw) {
             review += pe::needsReview(r.status);
         }
     });
-    appendLog(L"Done: " + std::to_wstring(index_.topics.size()) + L" topics, " + std::to_wstring(ranges) +
-              L" ranges, " + std::to_wstring(review) + L" to verify, " + std::to_wstring(lost) + L" lost, " +
-              std::to_wstring(gaps_.size()) + L" unindexed passages, " + std::to_wstring(calls) + L" model calls" +
-              (result->failedTopics ? L", " + std::to_wstring(result->failedTopics) + L" topics failed" : L"") + L".");
+    if (progress.state == "done") {
+        SetWindowTextW(logTitle_, L"Indexing finished");
+        appendLog(L"Done: " + std::to_wstring(index_.topics.size()) + L" topics, " + std::to_wstring(ranges) +
+                  L" ranges, " + std::to_wstring(review) + L" to verify, " + std::to_wstring(lost) + L" lost, " +
+                  std::to_wstring(gaps_.size()) + L" unindexed passages, " + std::to_wstring(calls) +
+                  L" model calls" +
+                  (result->failedTopics ? L", " + std::to_wstring(result->failedTopics) + L" topics failed" : L"") +
+                  L".");
+    } else {
+        SetWindowTextW(logTitle_, L"Indexing stopped early");
+        appendLog(std::to_wstring(done) + L" of " + std::to_wstring(total) + L" topics are finished" +
+                  (done ? L" and in the index" : L"") + L". Rebuild index (Ctrl+R) offers to resume the other " +
+                  std::to_wstring(total - done) + L".");
+    }
     appendLog(transcripts);
+}
+
+// Puts a run's finished topics into the index, each anchored to the current
+// text. A full rebuild orders the index by the run's topic list and keeps the
+// previous version of topics not finished yet; a one-topic rebuild replaces
+// just that topic.
+void MainWindow::applyRun(const RunProgress& progress) {
+    const std::string current = documentText();
+    std::map<std::string, pe::Topic> done;
+    for (const auto& c : progress.completed) {
+        try {
+            pe::Index chunk = pe::parseIndex(c.at("index").dump());
+            pe::anchorIndex(chunk, current);  // trusts the offsets if the text is unchanged
+            if (!chunk.topics.empty()) done[c.value("name", "")] = std::move(chunk.topics.front());
+        } catch (const std::exception& e) {
+            appendLog(L"Skipped a saved topic that could not be read: " + widen(e.what()));
+        }
+    }
+    auto oldTopic = [&](const std::string& name) -> const pe::Topic* {
+        if (!hasIndex_) return nullptr;
+        for (const pe::Topic& t : index_.topics)
+            if (t.name == name) return &t;
+        return nullptr;
+    };
+    std::vector<pe::Topic> topics;
+    if (progress.replaceMode && hasIndex_) {
+        topics = index_.topics;
+        for (auto& [name, topic] : done) {
+            auto it = std::find_if(topics.begin(), topics.end(), [&](const pe::Topic& t) { return t.name == name; });
+            if (it != topics.end()) *it = topic;
+            else topics.push_back(topic);
+        }
+    } else {
+        for (const pe::TopicRequest& r : progress.topics) {
+            if (auto it = done.find(r.name); it != done.end()) topics.push_back(it->second);
+            else if (const pe::Topic* old = oldTopic(r.name)) topics.push_back(*old);
+        }
+    }
+    hits_.clear();  // they point into the old topics
+    current_ = -1;
+    selected_ = {-1, -1};
+    if (!hasIndex_) index_ = pe::Index{};
+    index_.document = narrow(docPath_.filename().wstring());
+    index_.topics = std::move(topics);
+    hasIndex_ = true;
+    indexSource_ = L"Index built by " + widen(settings_.model);
+    writeIndexFile();
+    buildTree();
+    refresh();
 }
 
 // Writes the index now if the document is saved; otherwise it is written with
@@ -1417,6 +1611,10 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                     return 0;
                 cancelJob();
                 if (worker_.joinable()) worker_.join();
+                // Apply the topics that finished before closing; the run stays resumable.
+                MSG pending;
+                if (PeekMessageW(&pending, hwnd_, WM_APP_JOB_DONE, WM_APP_JOB_DONE, PM_REMOVE))
+                    onJobDone(reinterpret_cast<JobResult*>(pending.lParam));
                 jobRunning_ = false;
             }
             if (confirmDiscard()) DestroyWindow(hwnd_);

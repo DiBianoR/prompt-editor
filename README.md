@@ -25,6 +25,10 @@ changes.
   passage in the document and click **Place at selection**, or **Discard** it.
   **Show the model's analysis** (Ctrl+I) shows what the model wrote about the
   selected topic before converting it. Progress shows at the bottom; Cancel stops it.
+  Each topic is saved as soon as it is finished, so stopping a run (Cancel,
+  closing the app, an error, even a crash) loses at most the topic in progress:
+  finished topics go into the index, and the next **Rebuild index** offers to
+  resume with the rest.
   **Rebuild selected topic** redoes one topic. Settings live in
   `%APPDATA%\PromptEditor` (the key encrypted for your Windows account) and
   transcripts of each run in `%LOCALAPPDATA%\PromptEditor\runs`.

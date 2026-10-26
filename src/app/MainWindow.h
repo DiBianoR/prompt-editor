@@ -18,6 +18,7 @@
 #include "core/Pipeline.h"
 
 class LlmClient;
+struct RunProgress;
 
 // Two panes: topics from the index on the left, the document on the right.
 // Selecting a topic highlights its ranges; Next/Previous steps through them.
@@ -85,12 +86,15 @@ private:
     // LLM indexing runs on a worker thread; results come back as messages.
     struct Job {
         enum Kind { Build, Discover } kind = Build;
-        std::vector<pe::TopicRequest> topics;
-        int replaceTopic = -1;    // rebuild just this topic of the index
-        std::wstring topicsText;  // Discover: the topic list to add proposals to
+        std::vector<pe::TopicRequest> topics;  // the topics to index in this job
+        bool replaceMode = false;               // rebuild these topics, keep the others
+        std::filesystem::path resumeFolder;     // continue this interrupted run
+        std::wstring topicsText;                // Discover: the topic list to add proposals to
     };
     struct JobResult;
     void openSettings();
+    bool offerResume(std::wstring& topicsText);
+    void applyRun(const RunProgress& progress);
     void rebuildIndexDialog(std::wstring topicsText = {});
     void rebuildSelectedTopic();
     void startJob(Job job);
