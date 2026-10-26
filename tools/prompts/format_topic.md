@@ -27,11 +27,11 @@ Each RANGE marks one passage of the document, in one of three forms:
                       other, it wins: hard limits, prohibitions, "always"/"never" rules, overrides, and
                       anything the prompt marks as important
   3  standard         a normal instruction on the topic, weighed evenly against everything else in the prompt
-  4  supporting       detail, an example, nuance, or a restatement of something said elsewhere; removing it
-                      would change the agent's behavior only a little
+  4  supporting       detail, an example, or nuance; if it were missing, the agent's behavior would change
+                      only a little
   5  incidental       mainly about something else; bears on this topic only in passing or by implication
 
-Two questions decide most cases. Deletion: how much would the agent's behavior here change without this passage? Conflict: if it clashed with another instruction, would it win? A passage that is both core and high precedence is tier 1. Rate each passage against the other passages on this topic: usually only a few are tier 1 or 2 and most are tier 3 or 4. If nearly everything looks like the same tier, look again for the differences between them.
+Two questions decide most cases. Deletion: how much would the agent's behavior here change if what this passage says were missing from the prompt entirely? Conflict: if it clashed with another instruction, would it win? A passage that is both core and high precedence is tier 1. Rate what a passage says, not whether it is said elsewhere: every copy of a repeated rule gets that rule's tier, and the repetition goes in the "note".
 
 Rules:
 
