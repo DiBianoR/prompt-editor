@@ -26,6 +26,7 @@ struct Span {
     size_t end = 0;
     AnchorStatus status = AnchorStatus::Exact;
     int tier = 0;  // from the range's "tier", 1..5; 0 = not given
+    std::string note;  // from the range's "note"
 };
 
 class ResolveError : public std::runtime_error {
@@ -61,7 +62,8 @@ std::string cleanQuote(const std::string& s);
 Span resolveRange(const SourceDocument& doc, const nlohmann::json& item);
 
 // Sorts spans and merges ones that overlap or are separated only by whitespace;
-// a merged span keeps the most load-bearing (lowest) tier of its parts.
+// a merged span keeps the most load-bearing (lowest) tier of its parts and
+// the notes of all of them.
 std::vector<Span> mergeSpans(std::vector<Span> spans, const std::string& text);
 
 AnchorStatus worse(AnchorStatus a, AnchorStatus b);

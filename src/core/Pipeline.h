@@ -74,6 +74,7 @@ struct LostRange {
     std::string text;    // the model's quote, or "from ... to" ends
     std::string reason;  // why it did not match
     int tier = 0;
+    std::string note;
 };
 
 struct TopicSpans {
@@ -95,6 +96,7 @@ struct TopicOutcome {
 // schema stops generation at these lengths so a runaway cannot eat the budget.
 constexpr size_t kMaxQuoteChars = 2000;
 constexpr size_t kMaxAnchorChars = 400;  // "from" and "to": asked for 4-12 words
+constexpr size_t kMaxNoteChars = 1500;   // a range's "note": a sentence or two from the findings
 
 struct PipelineHooks {
     std::function<void(const std::string&)> log;

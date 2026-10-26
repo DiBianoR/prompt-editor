@@ -28,6 +28,7 @@ Range parseRange(const json& j) {
     r.touched = j.value("touched", false);
     r.status = statusFromString(optString(j, "status"));
     if (auto t = j.find("tier"); t != j.end() && t->is_number_integer()) r.tier = clampTier(t->get<long long>());
+    r.note = optString(j, "note");
     if (r.end < r.start) throw std::runtime_error("range end before start");
     return r;
 }
@@ -54,6 +55,7 @@ json rangeJson(const Range& r) {
     j["suffix"] = r.suffix;
     j["touched"] = r.touched;
     if (r.tier) j["tier"] = r.tier;
+    if (!r.note.empty()) j["note"] = r.note;
     // Only statuses that still mean something after a save are written.
     if (needsReview(r.status)) j["status"] = toString(r.status);
     return j;

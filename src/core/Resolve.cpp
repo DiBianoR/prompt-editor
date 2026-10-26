@@ -237,7 +237,10 @@ Span resolveRangeUntiered(const SourceDocument& doc, const nlohmann::json& item)
 
 Span resolveRange(const SourceDocument& doc, const nlohmann::json& item) {
     Span span = resolveRangeUntiered(doc, item);
-    if (item.is_object()) span.tier = tierOf(item);
+    if (item.is_object()) {
+        span.tier = tierOf(item);
+        if (auto n = item.find("note"); n != item.end() && n->is_string()) span.note = trim(n->get<std::string>());
+    }
     return span;
 }
 
@@ -314,6 +317,8 @@ std::vector<Span> mergeSpans(std::vector<Span> spans, const std::string& text) {
                 last.end = std::max(last.end, s.end);
                 last.status = worse(last.status, s.status);
                 if (s.tier && (!last.tier || s.tier < last.tier)) last.tier = s.tier;
+                if (!s.note.empty() && last.note.find(s.note) == std::string::npos)
+                    last.note += (last.note.empty() ? "" : "\n") + s.note;
                 continue;
             }
         }

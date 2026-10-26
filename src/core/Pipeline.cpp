@@ -188,9 +188,10 @@ void applyFixes(const SourceDocument& doc, const nlohmann::json& reply, TopicSpa
     for (const auto& [id, fix] : fixes) {
         auto f = std::find_if(failures.begin(), failures.end(), [&](const Failure& x) { return x.id == id; });
         if (f == failures.end() || !fix.is_object()) continue;
-        // A fix that leaves out the tier keeps the one the range was given.
+        // A fix that leaves out the tier or note keeps the one the range was given.
         nlohmann::json item = fix;
-        if (!item.contains("tier") && f->item.is_object() && f->item.contains("tier")) item["tier"] = f->item["tier"];
+        for (const char* key : {"tier", "note"})
+            if (!item.contains(key) && f->item.is_object() && f->item.contains(key)) item[key] = f->item[key];
         try {
             nodeOf(topic, f->node).spans.push_back(resolveChecked(doc, item));
             failures.erase(f);
@@ -243,6 +244,7 @@ Range toRange(const Span& s) {
     // Exact and normalized matches are simply correct; the others need a look.
     r.status = needsReview(s.status) ? s.status : AnchorStatus::Exact;
     r.tier = s.tier;
+    r.note = s.note;
     return r;
 }
 
@@ -304,7 +306,8 @@ const nlohmann::json& topicSchema() {
                                 {"properties",
                                  {{"lines", {{"type", "string"}}},
                                   {"line", {{"type", "integer"}}},
-                                  {"tier", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}}}}};
+                                  {"tier", {{"type", "integer"}, {"minimum", 1}, {"maximum", 5}}},
+                                  {"note", {{"type", "string"}, {"maxLength", kMaxNoteChars}}}}}};
         range["properties"].update(quoteFields());
         nlohmann::json nodeProps = {{"name", {{"type", "string"}}},
                                     {"note", {{"type", "string"}}},
@@ -506,9 +509,12 @@ TopicOutcome indexTopic(ChatClient& llm, const SourceDocument& doc, const TopicR
     }
     for (const Failure& f : failures) {
         int tier = 0;
+        std::string note;
         if (f.item.is_object() && f.item.contains("tier") && f.item["tier"].is_number_integer())
             tier = clampTier(f.item["tier"].get<long long>());
-        nodeOf(topic, f.node).lost.push_back({describe(f.item), f.reason, tier});
+        if (f.item.is_object() && f.item.contains("note") && f.item["note"].is_string())
+            note = f.item["note"].get<std::string>();
+        nodeOf(topic, f.node).lost.push_back({describe(f.item), f.reason, tier, note});
         say(hooks, "  kept as lost: " + describe(f.item).substr(0, 80));
     }
 
@@ -537,6 +543,7 @@ Topic toIndexTopic(const TopicSpans& spans, const Index* previous, std::set<std:
             r.exact = l.text;
             r.status = AnchorStatus::Orphaned;
             r.tier = l.tier;
+            r.note = l.note;
             to.ranges.push_back(r);
         }
     };

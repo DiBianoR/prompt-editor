@@ -55,6 +55,7 @@ enum : int {
     IDC_REVIEW_LIST,
     IDC_REVIEW_PLACE,
     IDC_REVIEW_DISCARD,
+    IDC_TIER_FILTER,
 };
 
 constexpr UINT WM_APP_REFRESH = WM_APP + 1;
@@ -260,6 +261,12 @@ void MainWindow::createChildren() {
                                   hwnd_, reinterpret_cast<HMENU>(IDC_NEXT_BUTTON), instance_, nullptr);
     navLabel_ = CreateWindowExW(0, WC_STATICW, nullptr, WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,  // see drawNavLabel
                                 0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_NAV_LABEL), instance_, nullptr);
+    // Which tiers to highlight and step through; unrated passages always show.
+    tierFilter_ = CreateWindowExW(0, WC_COMBOBOXW, nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | CBS_DROPDOWNLIST,
+                                  0, 0, 0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_TIER_FILTER), instance_, nullptr);
+    for (const wchar_t* label : {L"All tiers (1–5)", L"Tiers 1–4", L"Tiers 1–3", L"Tiers 1–2", L"Tier 1 only"})
+        SendMessageW(tierFilter_, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
+    SendMessageW(tierFilter_, CB_SETCURSEL, 0, 0);
     editor_ = CreateWindowExW(0, L"Scintilla", nullptr, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN, 0, 0,
                               0, 0, hwnd_, reinterpret_cast<HMENU>(IDC_EDITOR), instance_, nullptr);
     overview_ = CreateWindowExW(0, kOverviewClass, nullptr, WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd_,
@@ -342,6 +349,10 @@ void MainWindow::setupEditor() {
     sci(SCI_INDICSETSTYLE, kIndicReview, INDIC_SQUIGGLEPIXMAP);
     sci(SCI_INDICSETFORE, kIndicReview, RGB(0xD0, 0x30, 0x30));
 
+    // Resting the mouse on a highlighted passage shows its note (showNoteTip).
+    sci(SCI_SETMOUSEDWELLTIME, 1000);
+    sci(SCI_CALLTIPUSESTYLE, 0);
+
     // The current passage's lines are shaded darker in the line-number margin.
     sci(SCI_MARKERDEFINE, kMarkCurrent, SC_MARK_FULLRECT);
     sci(SCI_MARKERSETBACKTRANSLUCENT, kMarkCurrent, (0x38 << 24) | RGB(0, 0, 0));
@@ -352,7 +363,7 @@ void MainWindow::updateFonts() {
     NONCLIENTMETRICSW ncm{sizeof ncm};
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0, dpi_);
     HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
-    for (HWND w : {tree_, prevButton_, nextButton_, navLabel_, status_, logTitle_, logEdit_, logCancel_, logClose_,
+    for (HWND w : {tree_, prevButton_, nextButton_, navLabel_, tierFilter_, status_, logTitle_, logEdit_, logCancel_, logClose_,
                    reviewLabel_, reviewList_, reviewPlace_, reviewDiscard_})
         SendMessageW(w, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     if (uiFont_) DeleteObject(uiFont_);
@@ -397,13 +408,15 @@ void MainWindow::layout() {
         ListView_SetColumnWidth(reviewList_, 0, scale(110));
     }
 
-    HDWP dwp = BeginDeferWindowPos(6);
+    HDWP dwp = BeginDeferWindowPos(7);
     dwp = DeferWindowPos(dwp, tree_, nullptr, 0, 0, tw, h - reviewH, SWP_NOZORDER);
     dwp = DeferWindowPos(dwp, prevButton_, nullptr, x + pad, pad, scale(96), navH - 2 * pad, SWP_NOZORDER);
     dwp = DeferWindowPos(dwp, nextButton_, nullptr, x + pad * 2 + scale(96), pad, scale(96), navH - 2 * pad,
                          SWP_NOZORDER);
-    const int lx = x + pad * 4 + scale(192);
-    dwp = DeferWindowPos(dwp, navLabel_, nullptr, lx, pad, std::max(0, w - lx - pad), navH - 2 * pad, SWP_NOZORDER);
+    const int lx = x + pad * 4 + scale(192), fw = scale(130);
+    dwp = DeferWindowPos(dwp, navLabel_, nullptr, lx, pad, std::max(0, w - lx - fw - 3 * pad), navH - 2 * pad,
+                         SWP_NOZORDER);
+    dwp = DeferWindowPos(dwp, tierFilter_, nullptr, w - fw - pad, pad + scale(2), fw, scale(200), SWP_NOZORDER);
     dwp = DeferWindowPos(dwp, editor_, nullptr, x, navH, std::max(0, w - x - ovW), std::max(0, h - navH),
                          SWP_NOZORDER);
     dwp = DeferWindowPos(dwp, overview_, nullptr, w - ovW, navH, ovW, std::max(0, h - navH), SWP_NOZORDER);
@@ -666,6 +679,40 @@ void MainWindow::selectNode(const NodeRef& node) {
     InvalidateRect(overview_, nullptr, FALSE);
 }
 
+// The note of the highlighted passage under pos (the current one first), as a
+// call tip wrapped to a readable width. Passages without a note show nothing.
+void MainWindow::showNoteTip(sptr_t pos) {
+    if (pos < 0) return;
+    const auto at = static_cast<size_t>(pos);
+    const Hit* hit = nullptr;
+    if (current_ >= 0 && hits_[current_].start <= at && at < hits_[current_].end) hit = &hits_[current_];
+    for (const Hit& h : hits_)
+        if (!hit && h.start <= at && at < h.end) hit = &h;
+    if (!hit || !hit->range || hit->range->note.empty()) return;
+    // Word-wrap at about 80 characters (bytes are close enough for a tip).
+    std::string wrapped;
+    size_t col = 0;
+    std::istringstream words(hit->range->note);
+    for (std::string line; std::getline(words, line);) {
+        std::istringstream in(line);
+        for (std::string w; in >> w;) {
+            if (col && col + 1 + w.size() > 80) {
+                wrapped += '\n';
+                col = 0;
+            } else if (col) {
+                wrapped += ' ';
+                ++col;
+            }
+            wrapped += w;
+            col += w.size();
+        }
+        wrapped += '\n';
+        col = 0;
+    }
+    while (!wrapped.empty() && wrapped.back() == '\n') wrapped.pop_back();
+    sci(SCI_CALLTIPSHOW, pos, reinterpret_cast<sptr_t>(wrapped.c_str()));
+}
+
 void MainWindow::collectHits() {
     hits_.clear();
     if (selected_.topic == kGapsNode) {
@@ -677,7 +724,8 @@ void MainWindow::collectHits() {
     auto add = [&](const pe::Topic& topic) {
         const COLORREF color = parseColor(topic.color, kGapColor);
         for (const pe::Range& r : topic.ranges)
-            if (r.status != pe::AnchorStatus::Orphaned) hits_.push_back({r.start, r.end, color, &r, r.tier});
+            if (r.status != pe::AnchorStatus::Orphaned && !(r.tier > maxTier_))
+                hits_.push_back({r.start, r.end, color, &r, r.tier});
     };
     add(*t);
     if (selected_.sub < 0)
@@ -2050,6 +2098,20 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 setCurrentTier(LOWORD(wp) - IDM_TIER_1 + 1);
                 return 0;
             }
+            if (LOWORD(wp) == IDC_TIER_FILTER) {
+                if (HIWORD(wp) == CBN_SELCHANGE) {
+                    const auto sel = SendMessageW(tierFilter_, CB_GETCURSEL, 0, 0);
+                    maxTier_ = pe::kTierCount - static_cast<int>(std::max<LRESULT>(0, sel));
+                    current_ = -1;
+                    collectHits();
+                    applyIndicators();
+                    updateNavLabel();
+                    InvalidateRect(overview_, nullptr, FALSE);
+                } else if (HIWORD(wp) == CBN_CLOSEUP) {
+                    SetFocus(tree_);  // so the arrow keys step through passages again
+                }
+                return 0;
+            }
             switch (LOWORD(wp)) {
                 case IDM_OPEN: openDialog(); return 0;
                 case IDM_SAVE: save(); return 0;
@@ -2132,6 +2194,12 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                         break;
                     case SCN_UPDATEUI:
                         if (n->updated & SC_UPDATE_V_SCROLL) InvalidateRect(overview_, nullptr, FALSE);
+                        break;
+                    case SCN_DWELLSTART:
+                        showNoteTip(n->position);
+                        break;
+                    case SCN_DWELLEND:
+                        sci(SCI_CALLTIPCANCEL);
                         break;
                 }
             } else if (hdr->hwndFrom == tree_ && hdr->code == TVN_SELCHANGEDW && !rebuildingTree_) {

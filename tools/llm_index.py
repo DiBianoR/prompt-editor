@@ -40,7 +40,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_index  # noqa: E402
 from resolve_quotes import (  # noqa: E402
-    Document, ResolveError, clean_quote, merge_spans, resolve_range, tier_of)
+    Document, ResolveError, clean_quote, merge_spans, note_of, resolve_range, tier_of)
 
 TOOLS = Path(__file__).resolve().parent
 PROMPTS = TOOLS / "prompts"
@@ -162,6 +162,7 @@ RANGE_SCHEMA = {
         "to": {"type": "string"},
         "line": {"type": "integer"},
         "tier": {"type": "integer", "minimum": 1, "maximum": 5},
+        "note": {"type": "string", "maxLength": 1500},
     },
 }
 NODE_PROPS = {
@@ -266,9 +267,10 @@ def apply_fixes(doc, reply, topic, failures):
         f = by_id.get(fix.get("id")) if isinstance(fix, dict) else None
         if not f:
             continue
-        # A fix that leaves out the tier keeps the one the range was given.
-        if "tier" not in fix and isinstance(f["item"], dict) and "tier" in f["item"]:
-            fix = dict(fix, tier=f["item"]["tier"])
+        # A fix that leaves out the tier or note keeps the one the range was given.
+        for key in ("tier", "note"):
+            if key not in fix and isinstance(f["item"], dict) and key in f["item"]:
+                fix = dict(fix, **{key: f["item"][key]})
         try:
             node_of(topic, f["node"])["spans"].append(resolve_range(doc, fix))
             del by_id[f["id"]]
@@ -339,7 +341,10 @@ def index_topic(llm, doc, name, hint, repairs, run_dir):
             print(f"    repair reply was not valid JSON ({e})")
         print(f"    fixed {before - len(failures)}, {len(failures)} still unmatched")
     for f in failures:
-        node_of(topic, f["node"])["lost"].append({"text": describe(f["item"]), "tier": tier_of(f["item"])})
+        lost = {"text": describe(f["item"]), "tier": tier_of(f["item"])}
+        if note_of(f["item"]):
+            lost["note"] = note_of(f["item"])
+        node_of(topic, f["node"])["lost"].append(lost)
 
     topic["name"] = name  # the topic list's name wins over the model's rewording
     topic = clean_topic(doc, topic)
@@ -403,17 +408,20 @@ def byte_to_char(text):
 
 def spans_spec(spans, lost=()):
     out = []
-    for s, e, status, tier in spans:
+    for s, e, status, tier, note in spans:
         r = {"span": [s, e]}
         if status in ("fuzzy", "ambiguous"):
             r["status"] = status
         if tier:
             r["tier"] = tier
+        if note:
+            r["note"] = note
         out.append(r)
     for item in lost:
         r = {"lost": item["text"]}
-        if item.get("tier"):
-            r["tier"] = item["tier"]
+        for key in ("tier", "note"):
+            if item.get(key):
+                r[key] = item[key]
         out.append(r)
     return out
 
@@ -430,8 +438,9 @@ def existing_topic_spec(text, topic):
         for r in t["ranges"]:
             item = {"lost": r["exact"]} if r.get("status") == "orphaned" else \
                 {"span": [b2c[r["start"]], b2c[r["end"]]], **({"status": r["status"]} if r.get("status") else {})}
-            if r.get("tier"):
-                item["tier"] = r["tier"]
+            for key in ("tier", "note"):
+                if r.get(key):
+                    item[key] = r[key]
             n["ranges"].append(item)
         return n
     spec = node(topic)

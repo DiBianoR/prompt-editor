@@ -33,7 +33,10 @@ changes.
   selected topic before converting it. Progress shows at the bottom; Cancel stops it.
   The model rates every passage's tier, how load-bearing it is for the topic
   (1 core, 2 high precedence, 3 standard, 4 supporting, 5 incidental); lower
-  tiers are highlighted more lightly.
+  tiers are highlighted more lightly, and the drop-down above the document
+  hides the lower tiers from highlighting and Next/Previous. Each passage also
+  keeps what the model's findings said about it; rest the mouse on a
+  highlighted passage for a second to read it.
 - Edit the index by hand from the **Passage** menu: add the selection to the
   selected topic (Ctrl+Shift+A), remove the current passage (Delete in the topic
   list), fit it to the selection (Ctrl+Shift+F), or set its tier (Alt+1..5,

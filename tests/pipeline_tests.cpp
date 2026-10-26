@@ -100,12 +100,14 @@ void testFromTo() {
 }
 
 void testMerge() {
-    std::vector<Span> spans = {resolve({{"lines", "4"}, {"tier", 3}}), resolve({{"quote", "Always read a file"}, {"tier", 1}}),
+    std::vector<Span> spans = {resolve({{"lines", "4"}, {"tier", 3}, {"note", "a"}}),
+                               resolve({{"quote", "Always read a file"}, {"tier", 1}, {"note", "b"}}),
                                resolve({{"lines", "6"}})};
     const auto merged = mergeSpans(spans, kDoc);
     CHECK(merged.size() == 2);
     CHECK(merged[0].tier == 1);  // the most load-bearing tier wins
     CHECK(merged[1].tier == 0);
+    CHECK(merged[0].note == "b\na" && merged[1].note.empty());  // notes of merged parts, in document order
 }
 
 void testCoverage() {
@@ -229,8 +231,9 @@ void testFindFormatRepair() {
 
 void testUnfixableIsKeptAsLost() {
     json bad = {{"name", "X"},
-                {"ranges", json::array({{{"lines", "4"}, {"tier", 1}},
-                                        {{"quote", "This sentence is nowhere in the document at all."}, {"tier", 4}}})},
+                {"ranges", json::array({{{"lines", "4"}, {"tier", 1}, {"note", " Reads before editing. "}},
+                                        {{"quote", "This sentence is nowhere in the document at all."}, {"tier", 4},
+                                         {"note", "Invented."}}})},
                 {"subtopics", json::array()}};
     FakeLLM llm({"findings", "not json", bad.dump(), R"({"fixes": []})",
                  R"({"fixes": [{"id": "r1", "quote": "Still not in the document, sorry about that."}]})"});
@@ -248,9 +251,13 @@ void testUnfixableIsKeptAsLost() {
     CHECK(t.ranges.size() == 2);
     CHECK(t.ranges[1].status == AnchorStatus::Orphaned && t.ranges[1].exact == out.topic.lost[0].text);
     CHECK(t.ranges[0].tier == 1 && t.ranges[1].tier == 4);
+    // Notes: trimmed, kept by a fix that gives none, carried to lost ranges and saved.
+    CHECK(t.ranges[0].note == "Reads before editing." && t.ranges[1].note == "Invented.");
     Index index = assembleIndex("agent.md", kDoc, {t});
     CHECK(index.topics[0].ranges[1].status == AnchorStatus::Orphaned);  // kept through assembly
-    CHECK(parseIndex(serializeIndex(index)).topics[0].ranges[1].status == AnchorStatus::Orphaned);
+    const Index reread = parseIndex(serializeIndex(index));
+    CHECK(reread.topics[0].ranges[1].status == AnchorStatus::Orphaned);
+    CHECK(reread.topics[0].ranges[0].note == "Reads before editing." && reread.topics[0].ranges[1].note == "Invented.");
 }
 
 void testFragmentIsRejected() {

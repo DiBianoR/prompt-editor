@@ -93,6 +93,7 @@ private:
 
     void selectNode(const NodeRef& node);
     void collectHits();
+    void showNoteTip(sptr_t pos);
     void applyIndicators();
     void gotoHit(int i);
     void next(int direction);
@@ -152,6 +153,8 @@ private:
     HWND prevButton_ = nullptr;
     HWND nextButton_ = nullptr;
     HWND navLabel_ = nullptr;
+    HWND tierFilter_ = nullptr;
+    int maxTier_ = pe::kTierCount;  // passages of higher (less load-bearing) tiers are hidden
     HWND status_ = nullptr;
     HWND overview_ = nullptr;
     HACCEL accel_ = nullptr;

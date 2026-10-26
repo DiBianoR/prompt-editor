@@ -249,10 +249,16 @@ def tier_of(item):
     return t if isinstance(t, int) and 1 <= t <= 5 else 0
 
 
+def note_of(item):
+    """The range's "note": what the model's findings said about the passage."""
+    n = item.get("note") if isinstance(item, dict) else None
+    return n.strip() if isinstance(n, str) else ""
+
+
 def resolve_range(doc, item):
-    """Resolves one range item. Returns (start, end, status, tier); offsets are characters."""
+    """Resolves one range item. Returns (start, end, status, tier, note); offsets are characters."""
     start, end, status = _resolve_untiered(doc, item)
-    return start, end, status, tier_of(item)
+    return start, end, status, tier_of(item), note_of(item)
 
 
 def _resolve_untiered(doc, item):
@@ -300,13 +306,16 @@ def _resolve_untiered(doc, item):
 
 def merge_spans(spans, text):
     """Sorts spans and merges overlapping ones, or ones separated only by whitespace;
-    a merged span keeps the most load-bearing (lowest) tier. spans: (start, end, status, tier)."""
+    a merged span keeps the most load-bearing (lowest) tier and the notes of all its
+    parts. spans: (start, end, status, tier, note)."""
     out = []
-    for s, e, st, tier in sorted(spans):
+    for s, e, st, tier, note in sorted(spans):
         if out and (s <= out[-1][1] or not text[out[-1][1]:s].strip()):
-            ps, pe, pst, ptier = out[-1]
+            ps, pe, pst, ptier, pnote = out[-1]
             best = min(t for t in (ptier, tier) if t) if (ptier or tier) else 0
-            out[-1] = (ps, max(pe, e), worse(pst, st), best)
+            if note and note not in pnote:
+                pnote = f"{pnote}\n{note}" if pnote else note
+            out[-1] = (ps, max(pe, e), worse(pst, st), best, pnote)
         else:
-            out.append((s, e, st, tier))
+            out.append((s, e, st, tier, note))
     return out

@@ -101,6 +101,7 @@ class ResolveTests(unittest.TestCase):
         merged = merge_spans([a, b, c], self.doc.text)
         self.assertEqual(len(merged), 2)
         self.assertEqual(merged[0][3], 1)  # the most load-bearing tier wins
+        self.assertEqual(resolve_range(self.doc, {"lines": "4", "note": " why "})[4], "why")
         self.assertEqual(merged[1][3], 0)
 
     def test_tier(self):

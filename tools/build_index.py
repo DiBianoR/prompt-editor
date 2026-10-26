@@ -90,8 +90,9 @@ def build_range(text, offsets, spec, where, covered):
     if "lost" in spec:
         out = {"start": 0, "end": 0, "exact": spec["lost"], "prefix": "", "suffix": "",
                "touched": False, "status": "orphaned"}
-        if spec.get("tier"):
-            out["tier"] = spec["tier"]
+        for key in ("tier", "note"):
+            if spec.get(key):
+                out[key] = spec[key]
         return out
     start, end = resolve(text, spec, where)
     covered.append((start, end))
@@ -105,8 +106,9 @@ def build_range(text, offsets, spec, where, covered):
     }
     if spec.get("status"):
         out["status"] = spec["status"]
-    if spec.get("tier"):
-        out["tier"] = spec["tier"]
+    for key in ("tier", "note"):
+        if spec.get(key):
+            out[key] = spec[key]
     return out
 
 

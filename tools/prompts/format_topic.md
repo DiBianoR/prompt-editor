@@ -19,6 +19,8 @@ Each RANGE marks one passage of the document, in one of three forms:
 
 "line" is the line number where the passage starts. It is optional, but include it.
 
+Every form may also have a "note": whatever your findings said about this specific passage, copied verbatim, or an empty string. Copy it; do not write a new one.
+
 "tier" says how load-bearing the passage is. Give every range one:
 
   1  core             part of the agent's core behavior on this topic: removing or reversing it would

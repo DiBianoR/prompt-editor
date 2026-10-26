@@ -31,6 +31,7 @@ struct Range {
     bool touched = false;  // edited since the last LLM refresh
     AnchorStatus status = AnchorStatus::Exact;
     int tier = 0;  // how load-bearing: 1 core ... 5 incidental; 0 = not rated
+    std::string note;  // what the model's findings said about this passage
 };
 
 constexpr int kTierCount = 5;
