@@ -255,7 +255,9 @@ void testUnfixableIsKeptAsLost() {
     CHECK(t.ranges[0].note == "Reads before editing." && t.ranges[1].note == "Invented.");
     Index index = assembleIndex("agent.md", kDoc, {t});
     CHECK(index.topics[0].ranges[1].status == AnchorStatus::Orphaned);  // kept through assembly
+    index.id = "0123456789ab";
     const Index reread = parseIndex(serializeIndex(index));
+    CHECK(reread.id == "0123456789ab");
     CHECK(reread.topics[0].ranges[1].status == AnchorStatus::Orphaned);
     CHECK(reread.topics[0].ranges[0].note == "Reads before editing." && reread.topics[0].ranges[1].note == "Invented.");
 }

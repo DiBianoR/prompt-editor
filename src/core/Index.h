@@ -46,7 +46,9 @@ struct Topic {
     std::string note;
     std::vector<Range> ranges;
     std::vector<Topic> subtopics;  // one level only
-    std::string analysis;          // path of the model's findings for this topic, if any
+    // The model's findings for this topic, if any: relative to the document's
+    // folder (see the app's documentFolder), or an absolute path in older indexes.
+    std::string analysis;
 };
 
 // Document text that no topic claims.
@@ -58,6 +60,7 @@ struct Gap {
 
 struct Index {
     int version = 1;
+    std::string id;  // random, given when first built; finds the document's files whatever it is called
     std::string document;
     std::string documentHash;  // "sha256:<hex>" of the file the offsets refer to
     std::vector<Topic> topics;

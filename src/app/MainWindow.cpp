@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include <commdlg.h>
+#include <random>
 #include <shellapi.h>
 #include <windowsx.h>
 
@@ -42,6 +43,8 @@ enum : int {
     IDM_TIER_NONE = IDM_TIER_1 + 5,
     IDM_DELETE_TOPIC,
     IDM_FIND,
+    IDM_RENAME,
+    IDM_ATTACH_INDEX,
     IDC_TREE = 200,
     IDC_EDITOR,
     IDC_PREV_BUTTON,
@@ -162,7 +165,10 @@ bool MainWindow::create(HINSTANCE instance, int show) {
     HMENU file = CreatePopupMenu();
     AppendMenuW(file, MF_STRING, IDM_OPEN, L"&Open...\tCtrl+O");
     AppendMenuW(file, MF_STRING, IDM_SAVE, L"&Save\tCtrl+S");
+    AppendMenuW(file, MF_STRING, IDM_RENAME, L"Re&name document and index...");
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_RELOAD_INDEX, L"&Reload index\tF5");
+    AppendMenuW(file, MF_STRING, IDM_ATTACH_INDEX, L"&Attach index file...");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_STRING, IDM_EXIT, L"E&xit");
     HMENU nav = CreatePopupMenu();
@@ -466,7 +472,148 @@ bool MainWindow::open(const std::filesystem::path& docPath, std::filesystem::pat
     buildTree();
     refresh();
     updateTitle();
+    fixStaleDocumentName();
     return true;
+}
+
+// After a rename outside the app, the index still names the old file and the
+// document's folder still carries the old name; both are brought up to date.
+void MainWindow::fixStaleDocumentName() {
+    if (!hasIndex_) return;
+    documentFolder(false);  // renames a stale folder
+    const std::string name = narrow(docPath_.filename().wstring());
+    if (index_.document == name) return;
+    appendLog(L"The index named the document \"" + widen(index_.document) + L"\"; updated to \"" + widen(name) +
+              L"\".");
+    index_.document = name;
+    writeIndexFile();
+}
+
+// File > Rename: renames the document, its index (and the index's backup) and
+// the document's folder together, so they stay paired.
+void MainWindow::renameDocument() {
+    if (docPath_.empty() || jobRunning_) return;
+    wchar_t file[MAX_PATH] = L"";
+    lstrcpynW(file, docPath_.filename().c_str(), MAX_PATH);
+    const std::wstring dir = docPath_.parent_path().wstring();
+    OPENFILENAMEW ofn{sizeof ofn};
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrTitle = L"Rename the document";
+    ofn.lpstrFilter = L"All files\0*.*\0";
+    ofn.lpstrInitialDir = dir.c_str();
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetSaveFileNameW(&ofn)) return;
+    const std::filesystem::path target = file;
+    if (target == docPath_) return;
+    const std::filesystem::path targetIndex = defaultIndexPath(target);
+    std::error_code ec;
+    for (const auto& p : {target, targetIndex})
+        if (std::filesystem::exists(p, ec)) {
+            showError(hwnd_, L"There already is a file named " + p.wstring() + L". Nothing was renamed.");
+            return;
+        }
+    std::filesystem::rename(docPath_, target, ec);
+    if (ec) {
+        showError(hwnd_, L"Could not rename the document: " + widen(ec.message()));
+        return;
+    }
+    std::wstring moved = L"Renamed " + docPath_.filename().wstring() + L" to " + target.filename().wstring();
+    if (std::filesystem::exists(indexPath_, ec)) {
+        std::filesystem::rename(indexPath_, targetIndex, ec);
+        if (ec) showError(hwnd_, L"The document was renamed, but its index could not be: " + widen(ec.message()));
+        else moved += L", and its index with it";
+        std::filesystem::path oldBak = indexPath_, newBak = targetIndex;
+        oldBak += L".bak";
+        newBak += L".bak";
+        if (std::filesystem::exists(oldBak, ec)) std::filesystem::rename(oldBak, newBak, ec);
+    }
+    docPath_ = target;
+    indexPath_ = targetIndex;
+    if (hasIndex_) {
+        index_.document = narrow(target.filename().wstring());
+        documentFolder(false);  // renames the document's folder to match
+        writeIndexFile();
+    }
+    updateTitle();
+    updateStatus();
+    SendMessageW(status_, SB_SETTEXTW, 2, reinterpret_cast<LPARAM>((moved + L".").c_str()));
+}
+
+// File > Attach index: pairs this document with an index file of another name
+// (after renaming the document outside the app, say). The index is anchored to
+// the text first and the match reported, with a warning when it probably
+// belongs to another document. Accepted, it is saved under this document's
+// index name; a file in the same folder is moved there rather than copied.
+void MainWindow::attachIndex() {
+    if (docPath_.empty() || jobRunning_) return;
+    if (sci(SCI_GETMODIFY)) {
+        MessageBoxW(hwnd_, L"Save the document first (Ctrl+S), so the index is matched against the text on disk.",
+                    kAppName, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    wchar_t file[MAX_PATH] = L"";
+    const std::wstring dir = docPath_.parent_path().wstring();
+    OPENFILENAMEW ofn{sizeof ofn};
+    ofn.hwndOwner = hwnd_;
+    ofn.lpstrTitle = L"Attach an index to this document";
+    ofn.lpstrFilter = L"Indexes (*.index.json)\0*.index.json\0All files\0*.*\0";
+    ofn.lpstrInitialDir = dir.c_str();
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&ofn)) return;
+    const std::filesystem::path source = file;
+    std::string json;
+    pe::Index attached;
+    try {
+        if (!readFile(source, json)) throw std::runtime_error("could not read the file");
+        attached = pe::parseIndex(json);
+    } catch (const std::exception& e) {
+        showError(hwnd_, L"That is not an index this app can read:\n" + widen(e.what()));
+        return;
+    }
+    const pe::AnchorSummary s = pe::anchorIndex(attached, documentText());
+    const int total = s.total();
+    const int found = total - s.count(pe::AnchorStatus::Orphaned);
+    const int sure = s.count(pe::AnchorStatus::Exact) + s.count(pe::AnchorStatus::Moved) +
+                     s.count(pe::AnchorStatus::Normalized);
+    const std::string name = narrow(docPath_.filename().wstring());
+    std::wstring question = L"This index was made for \"" + widen(attached.document) + L"\"" +
+                            (attached.document == name ? L", this document's name." : L"; this document is \"" +
+                                                                                           widen(name) + L"\".");
+    if (s.hashMatched)
+        question += L"\n\nIt was made for exactly this text: all " + std::to_wstring(total) + L" passages match.";
+    else
+        question += L"\n\nOf its " + std::to_wstring(total) + L" passages, " + std::to_wstring(sure) +
+                    L" match this text, " + std::to_wstring(found - sure) + L" match approximately, and " +
+                    std::to_wstring(total - found) + L" are not in it.";
+    const bool doubtful = !s.hashMatched && total > 0 && sure * 2 < total;
+    if (doubtful) question += L"\n\nIt probably belongs to a different document.";
+    const bool sameFolder = source.parent_path() == docPath_.parent_path();
+    question += L"\n\nAttach it? It will be saved as " + indexPath_.filename().wstring() +
+                (source == indexPath_ ? L"" : sameFolder ? L" (moved from " + source.filename().wstring() + L")"
+                                                          : L" (copied; the original stays where it is)") +
+                (hasIndex_ && source != indexPath_ ? L", replacing the current index (kept as .bak)." : L".");
+    if (MessageBoxW(hwnd_, question.c_str(), kAppName,
+                    MB_OKCANCEL | (doubtful ? MB_ICONWARNING | MB_DEFBUTTON2 : MB_ICONQUESTION)) != IDOK)
+        return;
+    attached.document = name;
+    index_ = std::move(attached);
+    summary_ = s;
+    hasIndex_ = true;
+    indexSource_ = L"Index attached";
+    writeIndexFile();
+    std::error_code ec;
+    if (sameFolder && source != indexPath_ && std::filesystem::exists(indexPath_, ec))
+        std::filesystem::remove(source, ec);
+    documentFolder(false);  // renames the document's folder to match, if it has one
+    selected_ = {-1, -1};
+    hits_.clear();
+    current_ = -1;
+    buildTree();
+    refresh();
 }
 
 std::string MainWindow::documentText() const {
@@ -1067,24 +1214,64 @@ void MainWindow::setCurrentTier(int tier) {
                             : L"Tier cleared");
 }
 
-// A topic's files from the run that built it (findings, conversions, repairs)
-// sit in one folder, runs\<run>\<topic>; they go with the topic. The run's call
-// logs are per call and stay. Only a folder of that shape is returned.
-static std::filesystem::path topicRunFolder(const pe::Topic& topic) {
-    if (topic.analysis.empty()) return {};
-    std::error_code ec;
-    const auto folder = std::filesystem::weakly_canonical(std::filesystem::u8path(topic.analysis), ec).parent_path();
-    const auto runs = std::filesystem::weakly_canonical(runsFolder(), ec);
-    if (!ec && folder.parent_path().parent_path() == runs && folder.filename() != L"calls" &&
-        std::filesystem::is_directory(folder, ec))
-        return folder;
-    return {};
+// The index's id, given the first time a document is indexed.
+void MainWindow::ensureDocumentId() {
+    if (!index_.id.empty()) return;
+    std::random_device rd;
+    char id[13];
+    std::snprintf(id, sizeof id, "%06x%06x", rd() & 0xFFFFFF, rd() & 0xFFFFFF);
+    index_.id = id;
 }
 
-void MainWindow::deleteTopicFolder(const pe::Topic& topic) {
-    const std::filesystem::path folder = topicRunFolder(topic);
-    if (folder.empty()) return;
+// The document's folder under documentsFolder(), "<document name>-<index id>",
+// found by the id alone. A folder whose name part is stale (the document was
+// renamed) is renamed to match. Empty if the index has no id yet.
+std::filesystem::path MainWindow::documentFolder(bool create) {
+    if (index_.id.empty() || docPath_.empty()) return {};
+    const std::filesystem::path root = documentsFolder();
+    const std::wstring suffix = L"-" + widen(index_.id);
+    const std::filesystem::path wanted = root / (docPath_.stem().wstring() + suffix);
     std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator(root, ec)) {
+        const std::wstring name = e.path().filename().wstring();
+        if (!e.is_directory(ec) || name.size() < suffix.size() ||
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0)
+            continue;
+        if (e.path() == wanted) return wanted;
+        std::filesystem::rename(e.path(), wanted, ec);
+        if (ec) return e.path();  // still usable under its old name
+        appendLog(L"Renamed " + name + L" to " + wanted.filename().wstring() + L" to match the document.");
+        return wanted;
+    }
+    if (create) std::filesystem::create_directories(wanted, ec);
+    return wanted;
+}
+
+// Where a topic's findings are: relative to the document's folder, or an
+// absolute path in indexes made before documents had folders.
+std::filesystem::path MainWindow::analysisPath(const pe::Topic& topic) {
+    if (topic.analysis.empty()) return {};
+    const std::filesystem::path p = std::filesystem::u8path(topic.analysis);
+    if (p.is_absolute()) return p;
+    const std::filesystem::path folder = documentFolder(false);
+    return folder.empty() ? std::filesystem::path{} : (folder / p).make_preferred();
+}
+
+// A topic's files (findings, conversions, repairs) sit in one folder; it goes
+// with the topic. Only a folder of a known shape is deleted: documents\<doc>\
+// topics\<topic>, or runs\<run>\<topic> from before documents had folders.
+// Run call logs are per call and always stay.
+void MainWindow::deleteTopicFolder(const pe::Topic& topic) {
+    const std::filesystem::path findings = analysisPath(topic);
+    if (findings.empty()) return;
+    std::error_code ec;
+    const auto folder = std::filesystem::weakly_canonical(findings, ec).parent_path();
+    const auto runs = std::filesystem::weakly_canonical(runsFolder(), ec);
+    const auto docs = std::filesystem::weakly_canonical(documentsFolder(), ec);
+    const auto up2 = folder.parent_path().parent_path();
+    const bool known = (up2 == runs && folder.filename() != L"calls") ||
+                       (up2.parent_path() == docs && folder.parent_path().filename() == L"topics");
+    if (ec || !known || !std::filesystem::is_directory(folder, ec)) return;
     std::filesystem::remove_all(folder, ec);
     if (ec) appendLog(L"Could not delete " + folder.wstring() + L": " + widen(ec.message()));
 }
@@ -1099,11 +1286,10 @@ void MainWindow::deleteSelectedTopic() {
     if (node.sub < 0 && !topic.subtopics.empty())
         what += L" and its " + std::to_wstring(topic.subtopics.size()) +
                 (topic.subtopics.size() == 1 ? L" subtopic" : L" subtopics");
-    const std::filesystem::path topicFolder = node.sub < 0 ? topicRunFolder(topic) : std::filesystem::path{};
     std::wstring question = L"Delete the " + what + L" (" + std::to_wstring(passages) +
                             (passages == 1 ? L" passage" : L" passages") + L") from the index?";
-    if (!topicFolder.empty())
-        question += L"\n\nIts files from the run that built it are deleted too:\n" + topicFolder.wstring();
+    if (node.sub < 0 && !topic.analysis.empty())
+        question += L"\n\nIts saved findings and conversion are deleted too (the run's call logs are kept).";
     question += L"\n\nThe document itself is not changed.";
     if (MessageBoxW(hwnd_, question.c_str(), kAppName, MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK) return;
 
@@ -1171,9 +1357,9 @@ void MainWindow::showAnalysis() {
                     kAppName, MB_OK | MB_ICONINFORMATION);
         return;
     }
-    const std::filesystem::path path = std::filesystem::u8path(t.analysis);
+    const std::filesystem::path path = analysisPath(t);
     std::string text;
-    if (!readFile(path, text)) {
+    if (path.empty() || !readFile(path, text)) {
         showError(hwnd_, L"The analysis file is no longer there:\n" + path.wstring());
         return;
     }
@@ -1416,6 +1602,7 @@ struct RunProgress {
     bool replaceMode = false;  // rebuilding one topic, keeping the rest
     std::vector<pe::TopicRequest> topics;
     std::vector<std::string> order;  // replaceMode: the topic list's order, applied to the index afterwards
+    std::string docId;               // the index id the topic files were saved under
     nlohmann::json completed = nlohmann::json::array();  // [{"name", "index"}]
     nlohmann::json failed = nlohmann::json::array();     // [{"name", "reason"}]: retried on resume
 
@@ -1441,6 +1628,7 @@ struct RunProgress {
                             {"completed", completed}, {"failed", failed}};
         for (const pe::TopicRequest& t : topics) j["topics"].push_back({{"name", t.name}, {"hint", t.hint}});
         if (!order.empty()) j["order"] = order;
+        if (!docId.empty()) j["docId"] = docId;
         std::error_code ec;
         std::filesystem::create_directories(folder, ec);
         return writeFileAtomic(file(), j.dump(1));
@@ -1456,6 +1644,7 @@ struct RunProgress {
         out.document = j.value("document", "");
         out.state = j.value("state", "");
         out.replaceMode = j.value("replaceMode", false);
+        out.docId = j.value("docId", "");
         if (auto t = j.find("topics"); t != j.end() && t->is_array())
             for (const auto& x : *t) out.topics.push_back({x.value("name", ""), x.value("hint", "")});
         if (auto o = j.find("order"); o != j.end() && o->is_array())
@@ -1667,6 +1856,16 @@ void MainWindow::startJob(Job job) {
         progress.topics = job.topics;
         progress.order = job.order;
     }
+    // Topic files go to the document's folder (latest only); calls stay with the run.
+    // The run records the document's id, so a resumed run finds the same folder
+    // even if the index was never written in between.
+    std::filesystem::path topicsRoot;
+    if (job.kind == Job::Build) {
+        if (index_.id.empty()) index_.id = progress.docId;
+        ensureDocumentId();
+        progress.docId = index_.id;
+        topicsRoot = documentFolder(true) / L"topics";
+    }
     progress.state = "running";
     progress.failed = nlohmann::json::array();  // a resumed run retries every topic that failed before
     if (job.kind == Job::Build && !progress.save()) {
@@ -1701,16 +1900,22 @@ void MainWindow::startJob(Job job) {
     HWND hwnd = hwnd_;
     std::atomic<bool>* cancel = &cancel_;
     worker_ = std::thread([result = result.release(), progress, snapshot, docName, previous, hasPrevious, prompts,
-                           repairs, client, hwnd, cancel]() mutable {
+                           repairs, client, hwnd, cancel, topicsRoot]() mutable {
         auto log = [hwnd](const std::string& line) {
             PostMessageW(hwnd, WM_APP_JOB_LOG, 0, reinterpret_cast<LPARAM>(new std::wstring(widen(line))));
         };
         pe::PipelineHooks hooks;
         hooks.log = log;
         hooks.cancelled = [cancel] { return cancel->load(); };
-        hooks.save = [folder = result->folder](const std::string& name, const std::string& content) {
+        // A topic's files ("<topic>/...") go to the document's topics folder, the rest
+        // to the run. A topic's findings come first, so they clear what an earlier
+        // build of the topic left there.
+        hooks.save = [run = result->folder, topicsRoot](const std::string& name, const std::string& content) {
             std::error_code ec;
-            const std::filesystem::path p = folder / std::filesystem::u8path(name);
+            const bool topicFile = !topicsRoot.empty() && name.find('/') != std::string::npos;
+            const std::filesystem::path p = (topicFile ? topicsRoot : run) / std::filesystem::u8path(name);
+            if (topicFile && name.size() > 14 && name.compare(name.size() - 14, 14, "/1-findings.md") == 0)
+                std::filesystem::remove_all(p.parent_path(), ec);
             std::filesystem::create_directories(p.parent_path(), ec);
             std::ofstream(p, std::ios::binary) << content;
         };
@@ -1756,8 +1961,7 @@ void MainWindow::startJob(Job job) {
                             (lost ? ", " + std::to_string(lost) + " lost (listed under the topics)" : ""));
                         for (const std::string& w : out.warnings) result->warnings.push_back(topics[i].name + ": " + w);
                         pe::Topic topic = pe::toIndexTopic(out.topic, prev, used, palette);
-                        topic.analysis =
-                            (result->folder / std::filesystem::u8path(out.analysisFile)).make_preferred().u8string();
+                        topic.analysis = "topics/" + out.analysisFile;  // relative to the document's folder
                         // Saved right away, with the text it refers to, so it survives anything that follows.
                         const pe::Index chunk = pe::assembleIndex(docName, snapshot, {topic});
                         progress.completed.push_back({{"name", topics[i].name},
@@ -1912,11 +2116,19 @@ void MainWindow::applyRun(const RunProgress& progress) {
             if (auto it = done.find(r.name); it != done.end()) topics.push_back(it->second);
             else if (const pe::Topic* old = oldTopic(r.name)) topics.push_back(*old);
         }
+        // A full rebuild drops the topics it was not given; their files go too.
+        if (hasIndex_)
+            for (const pe::Topic& old : index_.topics) {
+                const bool kept = std::any_of(topics.begin(), topics.end(), [&](const pe::Topic& t) {
+                    return t.name == old.name || t.analysis == old.analysis;
+                });
+                if (!kept) deleteTopicFolder(old);
+            }
     }
     hits_.clear();  // they point into the old topics
     current_ = -1;
     selected_ = {-1, -1};
-    if (!hasIndex_) index_ = pe::Index{};
+    if (!hasIndex_) index_ = pe::Index{index_.version, index_.id};  // keeps the id the run's files are under
     index_.document = narrow(docPath_.filename().wstring());
     index_.topics = std::move(topics);
     hasIndex_ = true;
@@ -2116,6 +2328,8 @@ LRESULT MainWindow::handle(UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_OPEN: openDialog(); return 0;
                 case IDM_SAVE: save(); return 0;
                 case IDM_RELOAD_INDEX: reloadIndex(); return 0;
+                case IDM_RENAME: renameDocument(); return 0;
+                case IDM_ATTACH_INDEX: attachIndex(); return 0;
                 case IDM_EXIT: PostMessageW(hwnd_, WM_CLOSE, 0, 0); return 0;
                 case IDM_NEXT:
                 case IDC_NEXT_BUTTON: next(+1); return 0;

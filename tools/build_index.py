@@ -168,6 +168,7 @@ def build_index(doc_path, spec):
         topics.append(topic)
     return {
         "version": 1,
+        **({"id": spec["id"]} if spec.get("id") else {}),
         "document": spec.get("document", doc_path),
         "documentHash": "sha256:" + hashlib.sha256(raw).hexdigest(),
         "offsetUnit": "utf8-byte",

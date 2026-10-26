@@ -83,6 +83,12 @@ private:
     void setCurrentTier(int tier);
     void deleteSelectedTopic();
     void deleteTopicFolder(const pe::Topic& topic);
+    void ensureDocumentId();
+    std::filesystem::path documentFolder(bool create);
+    std::filesystem::path analysisPath(const pe::Topic& topic);
+    void renameDocument();
+    void attachIndex();
+    void fixStaleDocumentName();
 
     // Find in the document (the standard Find dialog).
     void openFind();

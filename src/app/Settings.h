@@ -28,5 +28,9 @@ struct AppSettings {
     bool save() const;
 };
 
-// %LOCALAPPDATA%\PromptEditor\runs: transcripts of indexing runs.
+// %LOCALAPPDATA%\PromptEditor\runs: one folder per indexing run, with the
+// transcript of every model call and the run's progress. Kept as an archive.
 std::filesystem::path runsFolder();
+// %LOCALAPPDATA%\PromptEditor\documents: one folder per indexed document,
+// "<name>-<index id>", holding the latest files of each topic under topics\.
+std::filesystem::path documentsFolder();

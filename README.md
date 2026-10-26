@@ -51,8 +51,19 @@ changes.
   finished topics go into the index, and the next **Rebuild index** offers to
   resume with the rest.
   **Rebuild selected topic** redoes one topic. Settings live in
-  `%APPDATA%\PromptEditor` (the key encrypted for your Windows account) and
-  transcripts of each run in `%LOCALAPPDATA%\PromptEditor\runs`.
+  `%APPDATA%\PromptEditor` (the key encrypted for your Windows account). Every
+  run keeps the transcript of each model call in
+  `%LOCALAPPDATA%\PromptEditor\runs\<run>\calls`, as an archive. The latest
+  files of each topic (findings, conversion, repairs) are in
+  `%LOCALAPPDATA%\PromptEditor\documents\<document>-<id>\topics`, replaced
+  when the topic is rebuilt and deleted with it; the index's `id` finds that
+  folder whatever the document is called.
+- **File > Rename document and index** renames both together (and the
+  document's folder). After renaming the document elsewhere, **File > Attach
+  index file** pairs it with its old index: the index is matched against the
+  text first, and you are warned if it probably belongs to another document.
+  A document and index renamed together elsewhere are recognized on opening,
+  and the names stored for them are updated.
 - The default prompts are `tools/prompts/*.md`, built into the app. The same
   pipeline is available from a terminal as `tools/llm_index.py`.
 - Or write a spec that only quotes text, and build the index with

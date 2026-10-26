@@ -68,6 +68,9 @@ std::filesystem::path AppSettings::folder() {
 }
 
 std::filesystem::path runsFolder() { return knownFolder(FOLDERID_LocalAppData) / L"PromptEditor" / L"runs"; }
+std::filesystem::path documentsFolder() {
+    return knownFolder(FOLDERID_LocalAppData) / L"PromptEditor" / L"documents";
+}
 
 AppSettings AppSettings::load() {
     AppSettings s;

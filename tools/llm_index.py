@@ -474,13 +474,14 @@ def new_topic_spec(topic, old_by_name, used_ids):
     return spec
 
 
-def write_index(doc_path, out_path, topic_specs):
+def write_index(doc_path, out_path, topic_specs, doc_id=""):
+    """doc_id: the existing index's "id", kept so the editor still finds the document's files."""
     for i, t in enumerate(topic_specs):  # palette for new topics, inherited by subtopics
         if not t.get("color"):
             t["color"] = build_index.PALETTE[i % len(build_index.PALETTE)]
         for s in t["subtopics"]:
             s["color"] = s.get("color") or t["color"]
-    index = build_index.build_index(str(doc_path), {"document": doc_path.name, "topics": topic_specs})
+    index = build_index.build_index(str(doc_path), {"id": doc_id, "document": doc_path.name, "topics": topic_specs})
     if out_path.exists():
         out_path.replace(out_path.with_suffix(out_path.suffix + ".bak"))
     out_path.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
@@ -602,7 +603,7 @@ def cmd_build(args):
             specs.insert(replaced[0] if replaced else len(specs), new_topic_spec(r, old_by_name, used_ids))
     else:
         specs = [new_topic_spec(r, old_by_name, used_ids) for r in results]
-    index = write_index(doc_path, out_path, specs)
+    index = write_index(doc_path, out_path, specs, (old or {}).get("id", ""))
 
     statuses = {}
     for t in index["topics"]:

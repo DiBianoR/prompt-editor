@@ -106,6 +106,7 @@ Index parseIndex(const std::string& text) {
         json j = json::parse(text);
         Index index;
         index.version = j.value("version", 1);
+        index.id = optString(j, "id");
         index.document = optString(j, "document");
         index.documentHash = optString(j, "documentHash");
         for (const json& tj : j.at("topics")) {
@@ -127,6 +128,7 @@ Index parseIndex(const std::string& text) {
 std::string serializeIndex(const Index& index) {
     json j;
     j["version"] = index.version;
+    if (!index.id.empty()) j["id"] = index.id;
     j["document"] = index.document;
     j["documentHash"] = index.documentHash;
     j["offsetUnit"] = "utf8-byte";
